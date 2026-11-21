@@ -89,11 +89,34 @@ enum ProbeDylib {
     ///
     /// 越狱环境下的沙箱读数**全部作废**，必须在每次扫描的第一行就标出来，
     /// 否则会把"越狱给的权限"读成"App 的漏洞"。
+    ///
+    /// `_dyld_image_count` / `_dyld_get_image_name` 声明在 `<mach-o/dyld.h>`，
+    /// iOS SDK 的 Swift overlay 同样**不导出**（和 `sys_icache_invalidate`
+    /// 一个毛病），所以还是走 dlsym。链接期零依赖，取不到就明说取不到。
+    private typealias ImageCountFn = @convention(c) () -> UInt32
+    private typealias ImageNameFn = @convention(c) (UInt32) -> UnsafePointer<CChar>?
+
+    private static let imageCount: ImageCountFn? = {
+        guard let h = dlopen(nil, RTLD_NOW) else { return nil }
+        guard let s = dlsym(h, "_dyld_image_count") else { return nil }
+        return unsafeBitCast(s, to: ImageCountFn.self)
+    }()
+
+    private static let imageName: ImageNameFn? = {
+        guard let h = dlopen(nil, RTLD_NOW) else { return nil }
+        guard let s = dlsym(h, "_dyld_get_image_name") else { return nil }
+        return unsafeBitCast(s, to: ImageNameFn.self)
+    }()
+
     static func loadedImages() -> String {
-        let n = _dyld_image_count()
+        guard let count = imageCount, let nameAt = imageName else {
+            return "unavailable(dlsym _dyld_image_count)"
+        }
+
+        let n = count()
         var sus: [String] = []
         for i in 0..<n {
-            guard let c = _dyld_get_image_name(i) else { continue }
+            guard let c = nameAt(i) else { continue }
             let p = String(cString: c)
             let low = p.lowercased()
             if low.contains("systemhook") || low.contains("dopamine")
@@ -102,6 +125,7 @@ enum ProbeDylib {
                 sus.append(p)
             }
         }
-        return "count=\(n) injected=\(sus.isEmpty ? "none" : sus.joined(separator: ","))"
+        let list = sus.isEmpty ? "none" : sus.joined(separator: ",")
+        return "count=\(n) injected=\(list)"
     }
 }

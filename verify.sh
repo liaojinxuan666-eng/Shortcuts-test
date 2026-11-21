@@ -94,6 +94,23 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 echo
 
+# ------------------------------------------------------------------ iOS 不导出的符号
+# 这一类错误已经烧掉两轮 CI：macOS 的 Swift Darwin overlay 有，iOS 没有。
+# 本地看着能编，一上 -sdk iphoneos 就 "cannot find X in scope"。
+# 规则：只能出现在 dlsym 的字符串里，不能直接调用。
+echo "=== iOS 不导出的符号（必须走 dlsym） ==="
+BAD='sys_icache_invalidate|_dyld_[a-z_]+|_sandbox_[a-z_]+|_os_activity_[a-z_]+'
+hits=$(grep -rnE "($BAD)[[:space:]]*\(" IntentProbe/*.swift 2>/dev/null | grep -v '"' || true)
+if [ -n "$hits" ]; then
+  while IFS= read -r l; do
+    [ -n "$l" ] && warn "直接调用 iOS 不导出符号" "$l"
+  done <<< "$hits"
+  echo "        ${DIM}修法：dlsym(dlopen(nil, RTLD_NOW), \"符号名\")，别用 @_silgen_name${RST}"
+else
+  ok "没有直接调用" "全部在 dlsym 字符串里"
+fi
+echo
+
 # ------------------------------------------------------------------ 结论
 if [ "$fail" = "1" ]; then
   echo "${RED}自检未通过${RST}：把上面标记 MISS 的文件补齐再推。"

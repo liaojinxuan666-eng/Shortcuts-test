@@ -63,7 +63,7 @@ enum ProbeCodeExec {
         return -1
     }
 
-    private static func copyFile(_ from: String, _ to: String) -> Bool {
+    private static func copyFile(_ from: String, to: String) -> Bool {
         try? FileManager.default.removeItem(atPath: to)
         do {
             try FileManager.default.copyItem(atPath: from, toPath: to)
@@ -206,9 +206,10 @@ enum ProbeCodeExec {
 
         let textOff = textCodeOffset(broken)
         let off = textOff ?? (fileSize(broken) / 2)
-        if let (a, b) = flipByte(broken, at: off) {
+        let flipped = flipByte(broken, at: off)
+        if let f = flipped {
             let where_ = textOff != nil ? "__TEXT" : "fallback(mid-file)"
-            out.append("corrupt :: off=\(off) \(hex(a))->\(hex(b)) in=\(where_)")
+            out.append("corrupt :: off=\(off) \(hex(f.0))->\(hex(f.1)) in=\(where_)")
             out.append("dlopen(corrupt) :: \(ProbeDylib.load(broken))")
         } else {
             out.append("corrupt :: FAIL 无法就地改写")
@@ -239,7 +240,7 @@ enum ProbeCodeExec {
     static func dlopenSelfCopy() -> String {
         guard let exec = Bundle.main.executablePath else { return "skip(no exec path)" }
         let dst = tmp("selfcopy.bin")
-        guard copyFile(exec, dst) else { return "copy=FAIL" }
+        guard copyFile(exec, to: dst) else { return "copy=FAIL" }
         let r = ProbeDylib.load(dst)
         try? FileManager.default.removeItem(atPath: dst)
         return "note=MH_EXECUTE不能dlopen \(r)"

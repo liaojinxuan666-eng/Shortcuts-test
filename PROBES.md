@@ -456,6 +456,16 @@ dyld 会在 **cryptex 根**下再找一次。iOS 18 的 `/` 是 cryptex 的 firm
 | `jumpTest()` 加 `mprotect(RX)` | 把"显式拒绝"（EPERM）和"接受但不生效"（返回 0 仍 fault）分开 |
 | `sweep.dyld :: loadedImages()` | 每次扫描第一行就报**本进程被注入了什么**，越狱环境立刻可见 |
 
+### 顺带：这一类编译错误不该再烧第三轮
+
+v5 第一次构建挂在 `_dyld_image_count` / `_dyld_get_image_name`，和 v4 的
+`sys_icache_invalidate` 是同一个毛病：**符号在 macOS 的 Swift Darwin overlay 里
+有，iOS 没有**。本地写起来毫无感觉，一上 `-sdk iphoneos` 就 `cannot find X in scope`。
+
+`scripts/verify.sh` 现在有一条规则：`sys_icache_invalidate` / `_dyld_*` /
+`_sandbox_*` 这类符号**只能出现在 dlsym 的字符串里**，出现裸调用就警告。
+推之前跑一遍，比等 CI 快 5 分钟。
+
 ## 需要先定的一件事
 
 这台设备上量到的所有沙箱数据都不可用。两条路，选一条再往下走：

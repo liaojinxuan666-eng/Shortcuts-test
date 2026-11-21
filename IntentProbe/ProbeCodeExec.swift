@@ -3,44 +3,46 @@ import Foundation
 
 /// 代码执行能力的决定性实验。
 ///
-/// 前面 `sweep.exec :: mmap(rwx)=ok` 只说明**映射成功**，不说明能执行。
-/// iOS 的代码签名是在**缺页时**强制的：页可以映射，跳进去才被拦。
-/// 所以要分三步走，每步分离一个变量：
+/// ## 已经拿到的答案（v4，iPhone11,6 / iOS 18.5）
 ///
-/// 1. 把自己（已签名）拷到容器里再 dlopen → 测**位置**是否影响加载
-/// 2. 把拷贝改坏一个字节再 dlopen       → 测**签名**是否被校验
-/// 3. 往 RWX 页写 `ret` 然后真的跳进去   → 测**执行**是否被允许
+/// `mmap(RWX)` 成功、写 `ret` 成功、跳进去 → `SIGBUS / KERN_PROTECTION_FAILURE`，
+/// `ESR.ISS.DFSC = 0xF`（level-3 permission fault on instruction fetch），
+/// 崩在 pc == 刚 mmap 的那个地址，`vmRegionInfo` 显示该区间 `rw-/rwx`。
 ///
-/// 第 3 步会杀进程（预期），所以日志必须先写后跳。
+/// 三件事同时成立，含义很具体：
+///  - `mmap(PROT_EXEC)` **不报错**——内核接受了请求，把 EXEC 记进 max prot
+///  - 但**当前保护位没有 EXEC**（`rw-`），所以取指就在页表被拦
+///  - 拦截方式是 **VM 级 NX**，不是 AMFI 的签名校验：进程没被 SIGKILL，
+///    也没出现 `Code Signature Invalid`，就是一条普通的缺页权限错
 ///
-/// **本文件所有可能崩的步骤都先落盘再执行。** v3 的教训是：
-/// `sweep.selfcopy` 那一行在设备日志里整条缺失，因为没有一行日志能证明
-/// 它到底走到了哪一步 —— 崩了和没调用，在日志上长得一模一样。
+/// 所以 `sweep.exec :: mmap(rwx)=ok` 是内核说的谎。判据只能是"跳不跳"。
+///
+/// ## 一个已经证伪的对照（v4）
+///
+/// 拷贝自己的**可执行文件**再 dlopen，问不出"签名是否被校验"：
+/// dyld 对 `MH_EXECUTE` 一律拒绝，`cannot dlopen a main executable`。
+/// 完整副本和改坏副本拿到的是同一句话，这组对照没有变量。
+/// 换成真实 dylib —— 见 `stagedDylib()`。
 enum ProbeCodeExec {
 
     // MARK: - 0. 指令缓存刷新
 
     /// `sys_icache_invalidate` 声明在 `<libkern/OSCacheControl.h>`，iOS SDK 的
-    /// Darwin overlay **不导出**这个符号，直接调用会在编译期报
-    /// `cannot find 'sys_icache_invalidate' in scope`（CI 就是这么挂的）。
+    /// Darwin overlay **不导出**这个符号，直接调用会编译失败
+    /// （`cannot find 'sys_icache_invalidate' in scope`）。
     ///
-    /// 两种修法：
-    ///  - `@_silgen_name` 声明 → 编译期过，但把符号依赖推给链接期，仍然可能挂
-    ///  - dlsym 运行时取   → 链接期零依赖，取不到就退化为不刷新
-    ///
-    /// 选后者。取不到这件事本身也会写进日志，不再静默。
+    /// 用 dlsym 而不是 `@_silgen_name`：后者把失败推到链接期，拿到的是一条
+    /// `ld: symbol not found`，还得再猜一轮；前者失败只会让日志里出现
+    /// `sweep.icache :: unavailable`，实验照跑，结论打折但不丢。
     private typealias ICacheInvalidateFn =
         @convention(c) (UnsafeMutableRawPointer?, Int) -> Void
 
     private static let icacheInvalidate: ICacheInvalidateFn? = {
-        // dlopen(nil) 拿的是主镜像句柄，dlsym 会在全局作用域里找，
-        // libsystem_platform 是所有进程的依赖，一定在
         guard let h = dlopen(nil, RTLD_NOW) else { return nil }
         guard let s = dlsym(h, "sys_icache_invalidate") else { return nil }
         return unsafeBitCast(s, to: ICacheInvalidateFn.self)
     }()
 
-    /// 返回是否真的刷新了。没刷新不代表跳不过去，但结论要打折。
     static var icacheFlushAvailable: Bool { icacheInvalidate != nil }
 
     private static func flushICache(_ p: UnsafeMutableRawPointer, _ len: Int) -> Bool {
@@ -49,100 +51,171 @@ enum ProbeCodeExec {
         return true
     }
 
-    // MARK: - 1 & 2：位置 vs 签名
-
-    private static func step(_ msg: String) { ProbeLog.record("selfcopy.step", msg) }
+    // MARK: - 小工具
 
     private static func tmp(_ name: String) -> String {
         (NSTemporaryDirectory() as NSString).appendingPathComponent(name)
     }
 
-    /// 拷一份自己到容器里，返回 (路径, 大小)；失败返回 nil 并把原因落盘。
-    private static func copySelf(to dst: String) -> Int? {
-        guard let exec = Bundle.main.executablePath else {
-            step("fail no-exec-path")
-            return nil
-        }
-        step("exec=\(exec)")
-
-        // 用 copyItem 而不是「读进 Data 再写出」：
-        //  - 不把整个可执行文件（几十 MB）塞进内存
-        //  - 保留原文件的权限位，两个副本的差异只剩「路径」一个变量
-        try? FileManager.default.removeItem(atPath: dst)
-        do {
-            try FileManager.default.copyItem(atPath: exec, toPath: dst)
-        } catch {
-            let ns = error as NSError
-            step("fail copy \(ns.code) <\(ns.localizedDescription)>")
-            return nil
-        }
-
-        var size = -1
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: dst),
-           let n = attrs[.size] as? Int { size = n }
-        step("copy=ok dst=\(dst) size=\(size)")
-        return size
+    private static func fileSize(_ path: String) -> Int {
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let n = attrs[.size] as? Int { return n }
+        return -1
     }
 
-    /// 把 App 自己的可执行文件拷进容器再加载。
-    /// 这一组的价值在于：同一个文件，**只有位置和签名完整性不同**。
-    ///  - 拷贝后仍能加载 → 位置无关，签名才是指纹
-    ///  - 拷贝后不能加载 → 有路径/容器相关的策略
+    private static func copyFile(_ from: String, _ to: String) -> Bool {
+        try? FileManager.default.removeItem(atPath: to)
+        do {
+            try FileManager.default.copyItem(atPath: from, toPath: to)
+            return true
+        } catch {
+            let ns = error as NSError
+            ProbeLog.record("staged.step", "copy FAIL \(ns.code) \(from) -> \(to)")
+            return false
+        }
+    }
+
+    /// 就地翻一个字节。用 pread/pwrite，不把整个文件读进内存。
+    private static func flipByte(_ path: String, at off: Int) -> (UInt8, UInt8)? {
+        let fd = open(path, O_RDWR)
+        if fd < 0 { return nil }
+        defer { close(fd) }
+        var b: UInt8 = 0
+        if pread(fd, &b, 1, off_t(off)) != 1 { return nil }
+        let orig = b
+        b ^= 0xFF
+        if pwrite(fd, &b, 1, off_t(off)) != 1 { return nil }
+        return (orig, b)
+    }
+
+    // MARK: - Mach-O：找 __TEXT 里的一个代码偏移
+
+    /// 改坏哪个字节，决定了这一问在问什么：
+    ///  - 改在 `__LINKEDIT`（签名 blob 本身）→ dyld 报 "malformed"，问的是解析器
+    ///  - 改在 `__TEXT` 的代码段          → 报 "code signature invalid"，问的才是签名
     ///
-    /// **两次加载用两个不同的文件名。** 同一个路径 dlopen 两次，dyld 会命中
-    /// 自己的 image 缓存直接返回旧句柄，第二次根本不重新验签 —— 那样「改坏后
-    /// 还能加载」就是假阳性，结论会整个反过来。
-    static func dlopenSelfCopy() -> String {
-        step("start")
-        var out = ""
+    /// 所以要真的读一下 Mach-O 头。只读前 4KB，够装下所有 load command。
+    /// 全部用字节手工拼整数，不碰对齐问题。
+    private static func u32(_ b: [UInt8], _ o: Int) -> UInt32? {
+        guard o >= 0, o + 4 <= b.count else { return nil }
+        return UInt32(b[o]) | UInt32(b[o + 1]) << 8 | UInt32(b[o + 2]) << 16 | UInt32(b[o + 3]) << 24
+    }
 
-        // ---- 组 A：签名完整，只有位置变了
-        let intact = tmp("selfcopy-intact.bin")
-        if let size = copySelf(to: intact) {
-            out += "size=\(size)"
-            let sbxExec = ProbeFS.sandboxVerdict("file-map-executable", intact)
-            out += " sbx_exec=\(sbxExec)"
-            step("about-to-dlopen intact")
-            out += " dlopen_intact=\(ProbeDylib.load(intact))"
-            step("dlopen intact returned")
-            try? FileManager.default.removeItem(atPath: intact)
-        } else {
-            out += "dlopen_intact=skip(copy failed)"
-        }
+    private static func u64(_ b: [UInt8], _ o: Int) -> UInt64? {
+        guard o >= 0, o + 8 <= b.count else { return nil }
+        var v: UInt64 = 0
+        for i in (0..<8).reversed() { v = (v << 8) | UInt64(b[o + i]) }
+        return v
+    }
 
-        // ---- 组 B：位置同样在容器里，但签名坏了
-        let broken = tmp("selfcopy-corrupt.bin")
-        if let size = copySelf(to: broken), size > 8192 {
-            // 文件中部必定落在 __TEXT 或 __DATA 的签名覆盖范围内。
-            // 用 pread/pwrite 就地改，避免再复制一份完整副本。
-            let fd = open(broken, O_RDWR)
-            if fd < 0 {
-                out += " dlopen_corrupt=skip(open \(ProbeFS.err(errno)))"
-                step("fail open-rdwr \(ProbeFS.err(errno))")
-            } else {
-                let off = off_t(size / 2)
-                var b: UInt8 = 0
-                if pread(fd, &b, 1, off) == 1 {
-                    let orig = b
-                    b ^= 0xFF
-                    let wrote = pwrite(fd, &b, 1, off)
-                    step("corrupt off=\(off) \(hex(orig))->\(hex(b)) wrote=\(wrote)")
-                    out += " corrupt=ok@\(off)"
-                    step("about-to-dlopen corrupt")
-                    out += " dlopen_corrupt=\(ProbeDylib.load(broken))"
-                    step("dlopen corrupt returned")
-                } else {
-                    out += " dlopen_corrupt=skip(pread \(ProbeFS.err(errno)))"
-                    step("fail pread \(ProbeFS.err(errno))")
+    /// 返回 `__TEXT` 段内部的一个文件偏移（取段中部，避开头部与 load command）。
+    private static func textCodeOffset(_ path: String) -> Int? {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+        guard let d = try? fh.read(upToCount: 4096) else { return nil }
+        let b = [UInt8](d)
+
+        guard let magic = u32(b, 0), magic == 0xfeedfacf else { return nil }  // MH_MAGIC_64, arm64 LE
+        guard let ncmds = u32(b, 16) else { return nil }
+
+        var p = 32
+        for _ in 0..<ncmds {
+            guard let cmd = u32(b, p), let sz = u32(b, p + 4), sz >= 8, sz < 4096 else { return nil }
+            if cmd == 0x19 {   // LC_SEGMENT_64
+                let nameEnd = p + 24
+                guard nameEnd <= b.count else { return nil }
+                let raw = b[(p + 8)..<nameEnd].map { $0 == 0 ? UInt8(32) : $0 }
+                let name = (String(bytes: raw, encoding: .utf8) ?? "")
+                    .trimmingCharacters(in: .whitespaces)
+                if name == "__TEXT",
+                   let fileoff = u64(b, p + 40),
+                   let filesize = u64(b, p + 48),
+                   filesize > 0x4000 {
+                    return Int(fileoff) + Int(min(filesize / 2, 0x8000))
                 }
-                close(fd)
             }
-            try? FileManager.default.removeItem(atPath: broken)
-        } else {
-            out += " dlopen_corrupt=skip(copy failed or too small)"
+            p += Int(sz)
+        }
+        return nil
+    }
+
+    // MARK: - 1 & 2：位置 vs 签名（用真实 dylib）
+
+    /// 候选：**磁盘上真的存在**的 dylib。
+    ///
+    /// 不能拿 `/usr/lib/libSystem.B.dylib` 那种——它在 dyld shared cache 里，
+    /// 磁盘上 `lstat=ENOENT`，dlopen 走的是缓存，压根不读文件，问不出任何东西。
+    ///
+    /// `libobjc-trampolines.dylib` 是实测确认存在于 cryptex 里的（崩溃报告里
+    /// 它以独立 image 被映射，路径 `/private/preboot/Cryptexes/OS/usr/lib/`）。
+    private static func stagedCandidates() -> [String] {
+        var c: [String] = []
+        if let fw = Bundle.main.privateFrameworksPath {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: fw)) ?? []
+            c += items.filter { $0.hasSuffix(".dylib") }
+                .map { (fw as NSString).appendingPathComponent($0) }
+        }
+        c += [
+            "/private/preboot/Cryptexes/OS/usr/lib/libobjc-trampolines.dylib",
+            "/usr/lib/libRPAC.dylib",
+            "/usr/lib/libCoreLSKD.dylib",
+            "/usr/lib/libMainThreadChecker.dylib",
+        ]
+        return c
+    }
+
+    /// 三段对照，**每次只变一个变量**：
+    ///
+    /// | 条件 | 变了什么 | 能回答什么 |
+    /// |---|---|---|
+    /// | `dlopen(原路径)`   | —              | 基线：这个 dylib 本身能不能加载 |
+    /// | `dlopen(完整副本)` | 位置            | 换到我的容器里还认不认 |
+    /// | `dlopen(改坏副本)` | 位置相同、签名坏 | 签名到底校不校验 |
+    ///
+    /// 两个副本用**不同文件名**：同一路径 dlopen 两次会命中 dyld 的 image 缓存，
+    /// 第二次不重新验签，"改坏后仍 ok" 就是假阳性。
+    static func stagedDylib() -> [String] {
+        var out: [String] = []
+
+        var src: String?
+        for c in stagedCandidates() {
+            let fd = open(c, O_RDONLY)
+            if fd >= 0 {
+                close(fd)
+                src = c
+                out.append("pick :: \(c) size=\(fileSize(c))")
+                break
+            }
+            out.append("skip :: \(c) open=\(ProbeFS.err(errno))")
+        }
+        guard let path = src else {
+            out.append("result :: 没有可读的 dylib，这一组无法进行")
+            return out
         }
 
-        step("done")
+        out.append("dlopen(src) :: \(ProbeDylib.load(path))")
+
+        let intact = tmp("staged-intact.dylib")
+        let broken = tmp("staged-corrupt.dylib")
+        guard copyFile(path, to: intact), copyFile(path, to: broken) else {
+            out.append("result :: 拷贝失败，见 staged.step")
+            return out
+        }
+
+        out.append("dlopen(intact) :: \(ProbeDylib.load(intact))")
+
+        let textOff = textCodeOffset(broken)
+        let off = textOff ?? (fileSize(broken) / 2)
+        if let (a, b) = flipByte(broken, at: off) {
+            let where_ = textOff != nil ? "__TEXT" : "fallback(mid-file)"
+            out.append("corrupt :: off=\(off) \(hex(a))->\(hex(b)) in=\(where_)")
+            out.append("dlopen(corrupt) :: \(ProbeDylib.load(broken))")
+        } else {
+            out.append("corrupt :: FAIL 无法就地改写")
+        }
+
+        try? FileManager.default.removeItem(atPath: intact)
+        try? FileManager.default.removeItem(atPath: broken)
         return out
     }
 
@@ -151,14 +224,38 @@ enum ProbeCodeExec {
         return v < 16 ? "0" + s : s
     }
 
+    // MARK: - 已证伪：拷贝自己的可执行文件
+
+    /// 保留是因为它是**否定结果**的记录，而且它意外暴露了 dyld 的搜索路径：
+    ///
+    /// ```
+    /// tried: '<tmp>/selfcopy-intact.bin' (cannot dlopen a main executable ...),
+    ///        '/private/preboot/Cryptexes/OS/<tmp>/selfcopy-intact.bin' (no such file)
+    /// ```
+    ///
+    /// 第二条说明 dyld 会在 **cryptex 根**下再找一次——iOS 18 的 `/` 是
+    /// cryptex 的 firmlink 视图，不是真根。这一点对后面所有"路径归一化"的
+    /// 判断都有影响：同一个路径在 dyld 眼里有两个名字。
+    static func dlopenSelfCopy() -> String {
+        guard let exec = Bundle.main.executablePath else { return "skip(no exec path)" }
+        let dst = tmp("selfcopy.bin")
+        guard copyFile(exec, dst) else { return "copy=FAIL" }
+        let r = ProbeDylib.load(dst)
+        try? FileManager.default.removeItem(atPath: dst)
+        return "note=MH_EXECUTE不能dlopen \(r)"
+    }
+
     // MARK: - 3：真的跳进去
 
     /// 三种结局，对应三种完全不同的安全含义：
     ///  - 正常返回 → 匿名可执行内存可用，等价于 JIT
-    ///  - 进程被杀 → 代码签名在缺页时强制（**预期**，说明 W^X 是硬墙）
-    ///  - 段错误    → 页不可执行，但内核没杀进程
+    ///  - SIGBUS / 权限错 → 页表级 NX，内核在 mmap 时就悄悄把 EXEC 抹了（**实测**）
+    ///  - 被 SIGKILL 且报 code signature → AMFI 在缺页时校验签名
     ///
-    /// **这个函数可能直接杀死 App。** 日志在跳之前就落盘，所以崩了也能看到走到哪。
+    /// 加了一步 `mprotect(RX)`：它能把"显式拒绝"和"接受了但不生效"分开。
+    /// 前者返回 EPERM，后者返回 0 但取指仍然 fault。
+    ///
+    /// **这个函数会终止进程。** 日志在跳之前就落盘。
     static func jumpTest() -> String {
         let len = 4096
         let raw = mmap(nil, len,
@@ -174,10 +271,16 @@ enum ProbeCodeExec {
         let ret: UInt32 = 0xD65F03C0
         page.storeBytes(of: ret, as: UInt32.self)
 
+        // W^X 的标准顺序：写完再降到 RX。这一步的返回值是关键情报。
+        errno = 0
+        let mpr = mprotect(page, len, PROT_READ | PROT_EXEC)
+        let mprStr = mpr == 0 ? "ok" : ProbeFS.err(errno)
+        ProbeLog.record("exec.jump", "mprotect(rx)=\(mprStr)")
+
         let flushed = flushICache(page, len)
         ProbeLog.record("exec.jump", "icache_flush=\(flushed) ptr=\(page) opcode=ret")
         ProbeLog.record("exec.jump", "about-to-jump")
-        ProbeLog.record("exec.jump", "if the app dies here, code signing is enforced at fault time")
+        ProbeLog.record("exec.jump", "SIGBUS=page-table NX; SIGKILL+codesign=AMFI")
 
         typealias Fn = @convention(c) () -> Void
         let f = unsafeBitCast(page, to: Fn.self)
@@ -185,7 +288,7 @@ enum ProbeCodeExec {
 
         ProbeLog.record("exec.jump", "RETURNED NORMALLY —— 匿名可执行内存真的可用")
         munmap(page, len)
-        return "jump=ok(returned) icache_flush=\(flushed)"
+        return "jump=ok(returned) mprotect=\(mprStr) icache_flush=\(flushed)"
     }
 
     // MARK: - 汇总
@@ -194,8 +297,8 @@ enum ProbeCodeExec {
     static func fullBattery() -> [String] {
         var out: [String] = []
 
-        ProbeLog.record("battery.step", "1/2 selfcopy")
-        out.append("dlopen.selfcopy :: \(dlopenSelfCopy())")
+        ProbeLog.record("battery.step", "1/2 staged-dylib")
+        out += stagedDylib()
         ProbeLog.record("battery.step", "1/2 done")
 
         ProbeLog.record("battery.step", "2/2 exec-mmap")

@@ -78,4 +78,30 @@ enum ProbeDylib {
         let items = (try? FileManager.default.contentsOfDirectory(atPath: fw)) ?? []
         return items.filter { $0.hasSuffix(".dylib") }
     }
+
+    /// **本进程被注入了什么。**
+    ///
+    /// 这一项是 v5 加的，起因是 v4 的结果无法解释：`sandbox_check` 对每条路径
+    /// 都说 DENY，而 `open`/`read` 实际都能成功。看崩溃报告的 `usedImages`
+    /// 才发现进程里挂着
+    /// `/private/preboot/<hash>/dopamine-xxxx/procursus/basebin/systemhook.dylib`
+    /// —— 设备是越狱的，`sandbox_check` 本身被 hook 了。
+    ///
+    /// 越狱环境下的沙箱读数**全部作废**，必须在每次扫描的第一行就标出来，
+    /// 否则会把"越狱给的权限"读成"App 的漏洞"。
+    static func loadedImages() -> String {
+        let n = _dyld_image_count()
+        var sus: [String] = []
+        for i in 0..<n {
+            guard let c = _dyld_get_image_name(i) else { continue }
+            let p = String(cString: c)
+            let low = p.lowercased()
+            if low.contains("systemhook") || low.contains("dopamine")
+                || low.contains("substitute") || low.contains("ellekit")
+                || low.contains("/var/jb") || low.contains("tweak") {
+                sus.append(p)
+            }
+        }
+        return "count=\(n) injected=\(sus.isEmpty ? "none" : sus.joined(separator: ","))"
+    }
 }

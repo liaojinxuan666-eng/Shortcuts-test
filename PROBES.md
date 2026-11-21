@@ -354,3 +354,119 @@ selfcopy.step :: dlopen intact returned
 `interesting` 数组里已确认包含 `active` / `Cryptexes` / `Cryptexes/OS` 三条。
 v3 日志里没出现，最可能的原因就是**设备上跑的不是编译了这三条的二进制**——
 现在 `build=` 标记会直接回答这一点，先看它是不是 `v4-selfcopy-trail` 再判读其余内容。
+
+---
+
+# v4 实测结果（iPhone11,6 / iOS 18.5 22F76 / build v4-selfcopy-trail）
+
+这一轮拿到了 P11 的答案，同时暴露出**这台设备不能用来回答沙箱问题**。
+
+## 结论七：`mmap(RWX)=ok` 是内核说的谎，墙在页表，不在 AMFI
+
+崩溃报告逐字解码：
+
+```
+pc            0x104640000          ← 就是刚 mmap 出来的那个地址
+exception     EXC_BAD_ACCESS / SIGBUS
+subtype       KERN_PROTECTION_FAILURE
+ESR           0x8200000F
+  EC   = 0x20   Instruction Abort from lower EL（取指错，不是数据访问错）
+  DFSC = 0xF    Permission fault, level 3（页表项存在，但缺执行权限）
+vmRegionInfo  VM_ALLOCATE 104640000-104644000 [16K]  rw-/rwx
+                                                      ↑当前   ↑上限
+```
+
+三件事同时成立：
+
+1. `mmap(PROT_READ|PROT_WRITE|PROT_EXEC)` **返回成功**，没有 EPERM
+2. 但该区间的**当前**保护位是 `rw-`，没有 `x`；`rwx` 只存在于 max prot
+3. 取指时在**末级页表**上因权限位被拦 —— 这是硬件 NX
+
+**这不是代码签名校验。** 签名校验失败的表现是进程被 SIGKILL、终止原因写
+`Code Signature Invalid`、通常连崩溃报告都不留。这里是普通缺页权限错，
+`codeSigningMonitor: 1` 全程没参与。
+
+所以判据只能是一条：**跳不跳**。`mmap` 的返回值、`mprotect` 的返回值都不算数。
+
+> 对研究的意义：想要"跑自生成代码"，缺的不是绕过签名，是拿到
+> `dynamic-codesigning` entitlement。这两条路的成本差一个数量级。
+
+## 结论八：这台设备是越狱的，之前所有"绿色"全部作废
+
+崩溃报告的 `usedImages` 里有一条：
+
+```
+/private/preboot/5F6D13F7…B38/dopamine-iHw65x/procursus/basebin/systemhook.dylib
+```
+
+**Dopamine 的 systemhook 被注入进了本进程。** 佐证不止这一条：
+
+| 观测 | 原以为的含义 | 实际含义 |
+|---|---|---|
+| `/etc/passwd` 读出前 64 字节 | 沙箱可绕过 | 越狱给的（stock 上必然 EPERM） |
+| `/System/Library/Frameworks` 枚举到 245 条 | 目录遍历漏洞 | 同上 |
+| `/usr/lib` 里出现 `systemhook.dylib` | 系统库清单 | 越狱的注入器就在这 |
+| `sandbox_check` 对**每一条**路径都说 DENY，而 `open` 实际成功 | 策略层与内核不一致 | `sandbox_check` 本身被 hook 了 |
+| `/bin/sh`、`/dev/disk0` 的 `sandbox_check` 返回 `err(-1,EFAULT)` | 未解 | hook 处理不了这两个路径，`EFAULT` 是它的 bug |
+
+**这是本轮最重要的发现，也是最坏的消息**：`sandbox_check` 是我整套判读逻辑的
+锚点（"策略怎么说" vs "内核怎么做"），而它在这台设备上被替换了。所有
+`sweep.path` 的读数都是在问一个已经被改过的函数。
+
+`/private/preboot` 那 4 个条目也是同一个来源 —— 不是 App 的权限，是越狱的权限。
+
+### 哪些结论还活着
+
+| 结论 | 状态 |
+|---|---|
+| 结论七（RWX 不生效，页表级 NX） | **成立**，且不依赖沙箱读数 |
+| 结论五（系统库 dlopen 走 shared cache） | 成立，与越狱无关 |
+| 结论六（软链接创建不检查目标） | 待重测，可能是越狱给的 |
+| 结论二（目录枚举全通） | **作废** |
+| 结论三（`/private/preboot` 可枚举） | **作废** |
+| 任何 `sbx_*` 读数 | **作废** |
+
+## 结论九：`selfcopy` 这组对照没有变量（我的设计错误）
+
+```
+dlopen_intact  = FAIL <cannot dlopen a main executable '<tmp>/selfcopy-intact.bin'>
+dlopen_corrupt = FAIL <cannot dlopen a main executable '<tmp>/selfcopy-corrupt.bin'>
+```
+
+dyld 对 `MH_EXECUTE` 一律拒绝，**在任何签名检查之前**。完整副本和改坏副本
+拿到的是同一句话，这一组测不出任何东西。我用"拷自己"来隔离签名变量，
+但拷贝的对象根本不具备被 dlopen 的资格。
+
+顺带捡到一条有用信息：失败信息里的搜索路径是
+
+```
+tried: '<tmp>/selfcopy-intact.bin' (cannot dlopen a main executable),
+       '/private/preboot/Cryptexes/OS/<tmp>/selfcopy-intact.bin' (no such file)
+```
+
+dyld 会在 **cryptex 根**下再找一次。iOS 18 的 `/` 是 cryptex 的 firmlink 视图，
+同一个路径在 dyld 眼里有两个名字。后面所有"路径归一化"的判断都要记住这点。
+
+## v5 改了什么
+
+| 改动 | 为什么 |
+|---|---|
+| `stagedDylib()` 取代 `dlopenSelfCopy()` | 用**真实 dylib**（cryptex 里的 `libobjc-trampolines.dylib` 等）做三段对照：原路径 / 容器内完整副本 / 容器内改坏副本 |
+| 改坏位置按 Mach-O 解析定位到 `__TEXT` | 改在 `__LINKEDIT` 只会得到 "malformed"，问的是解析器不是签名 |
+| `jumpTest()` 加 `mprotect(RX)` | 把"显式拒绝"（EPERM）和"接受但不生效"（返回 0 仍 fault）分开 |
+| `sweep.dyld :: loadedImages()` | 每次扫描第一行就报**本进程被注入了什么**，越狱环境立刻可见 |
+
+## 需要先定的一件事
+
+这台设备上量到的所有沙箱数据都不可用。两条路，选一条再往下走：
+
+**A. 换一台未越狱设备**跑同一份包，重建基线。之后所有结论才谈得上"iOS 18.5
+的行为"。代价是要重新装一次，好处是 `sandbox_check` 恢复可信，
+`/etc/passwd` 那种"绿"会立刻变回 EPERM，噪声归零。
+
+**B. 承认研究对象是"越狱设备上的 App"**。那么问题就变了：不再是"沙箱能不能
+绕过"（已经绕过了），而是"在已越狱前提下，Shortcuts/App Intents 这条链路
+还能不能扩大战果"。这条路的前提是先接受：任何 App 都能做这些事，
+研究价值从"权限提升"转向"持久化 / 隐蔽性 / 供应链"。
+
+不选就继续跑，只会得到更多无法归因的绿色。

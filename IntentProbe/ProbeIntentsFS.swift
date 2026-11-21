@@ -21,6 +21,9 @@ struct ProbeSweepIntent: AppIntent {
             ProbeLog.record("sweep.container", line)
         }
 
+        // 第一行就要回答"我是不是在越狱环境里"——否则后面每条绿色都是误判
+        ProbeLog.record("sweep.dyld", ProbeDylib.loadedImages())
+
         for p in ProbeFS.interesting {
             ProbeLog.record("sweep.path", "\(p) :: \(ProbeFS.report(p))")
         }
@@ -31,10 +34,12 @@ struct ProbeSweepIntent: AppIntent {
         let icache = ProbeCodeExec.icacheFlushAvailable ? "dlsym-ok" : "unavailable"
         ProbeLog.record("sweep.icache", "sys_icache_invalidate=\(icache)")
 
-        // 关键的一组：同一个已签名二进制，位置变了还能不能加载；签名坏了还认不认
-        // 调用前后各落一行 —— v3 整条缺失时无法区分「没跑到」和「跑到一半崩了」
-        ProbeLog.record("sweep.selfcopy", "about-to-run")
-        ProbeLog.record("sweep.selfcopy", ProbeCodeExec.dlopenSelfCopy())
+        // 关键的一组：同一个 dylib，位置变了还能不能加载；签名坏了还认不认
+        // 自我拷贝（MH_EXECUTE）已证伪——dyld 一律拒绝，对照没有变量，见 v5 记录
+        ProbeLog.record("sweep.staged", "about-to-run")
+        for line in ProbeCodeExec.stagedDylib() {
+            ProbeLog.record("sweep.staged", line)
+        }
 
         for (name, path) in ProbeDylib.battery() {
             ProbeLog.record("sweep.dlopen", "\(name) :: \(ProbeDylib.load(path))")
@@ -203,12 +208,23 @@ struct ProbeFileDeepIntent: AppIntent {
 // MARK: - 11. 代码执行：唯一一个可能把 App 弄崩的探针
 
 /// 为什么单独一个：
-///  - `mmap(RWX)=ok` 只说明映射成功，iOS 的代码签名在**缺页时**才强制
-///  - 要判定，只能真的跳进去；跳进去大概率 SIGKILL
-///  - 崩了不影响结论：日志在跳之前就落盘了
+///  - `mmap(RWX)=ok` 只说明映射成功，能不能执行要看取指时页表给不给 EXEC
+///  - 要判定，只能真的跳进去
 ///
-/// 期望结果：App 闪退，`probe.log` 最后两行停在 `about-to-jump`。
-/// 如果反而打出 `RETURNED NORMALLY`，那就是真的能跑自生成代码——这条要立刻深挖。
+/// **v4 实测结果（iPhone11,6 / iOS 18.5）：**
+/// ```
+/// exec.jump :: icache_flush=true ptr=0x104640000 opcode=ret
+/// exec.jump :: about-to-jump
+/// → SIGBUS, KERN_PROTECTION_FAILURE at 0x104640000, ESR.DFSC=0xF (level-3 perm fault)
+/// → vmRegionInfo: VM_ALLOCATE 104640000-104644000 [16K] rw-/rwx
+/// ```
+/// `rw-/rwx` 是关键：max prot 有 EXEC，当前 prot 没有。也就是说
+/// **`mmap(PROT_EXEC)` 没报错，但内核把 EXEC 从当前保护位里抹掉了**，
+/// 取指时才在页表上 fault。这不是 AMFI 的签名校验（那样会 SIGKILL），
+/// 是纯 VM 级 NX。v5 因此加了 `mprotect(RX)` 一步，把"显式拒绝"和
+/// "接受了但不生效"分开。
+///
+/// 如果打出 `RETURNED NORMALLY`，那就是真的能跑自生成代码——这条要立刻深挖。
 struct ProbeCodeExecIntent: AppIntent {
     static var title: LocalizedStringResource = "Probe: 代码执行（可能崩溃）"
     static var description: IntentDescription? =

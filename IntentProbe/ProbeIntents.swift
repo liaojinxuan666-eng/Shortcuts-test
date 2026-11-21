@@ -63,6 +63,14 @@ struct ProbeFileIntent: AppIntent {
     init() {}
     init(file: IntentFile) { self.file = file }
 
+    /// 从绝对路径里抠出 `Containers/Data/Application/<UUID>` 的 UUID。
+    /// 不在这个前缀下的（比如 /System）返回 "-"。
+    private static func containerUUID(ofPath path: String) -> String {
+        let marker = "/Containers/Data/Application/"
+        guard let r = path.range(of: marker) else { return "-" }
+        return path[r.upperBound...].split(separator: "/").first.map(String.init) ?? "-"
+    }
+
     func perform() async throws -> some IntentResult {
         ProbeLog.recordContext("file.ctx")
         let data = file.data
@@ -73,8 +81,23 @@ struct ProbeFileIntent: AppIntent {
             // 试着从该 URL 往上走，看能不能触及父目录（路径逃逸探测）
             let parent = u.deletingLastPathComponent()
             ProbeLog.record("file.parent", parent.path)
-            if let items = try? FileManager.default.contentsOfDirectory(atPath: parent.path) {
+
+            // 关键分辨：这个文件在我自己容器里，还是在别人容器里？
+            // 两个答案对应完全不同的信任边界，不能混为一谈。
+            let owner = Self.containerUUID(ofPath: u.path)
+            let mine = (owner == ProbeLog.containerUUID)
+            ProbeLog.record("file.owner", "owner=\(owner) mine=\(mine) myUUID=\(ProbeLog.containerUUID)")
+            if owner != "-" && !mine {
+                ProbeLog.record("file.owner.verdict", "跨容器：Shortcuts 递来的是别人容器里的活路径")
+            }
+
+            // 列目录失败本身也是结论：说明 scope 是"文件级"而不是"目录级"
+            do {
+                let items = try FileManager.default.contentsOfDirectory(atPath: parent.path)
                 ProbeLog.record("file.parent.list", "count=\(items.count) sample=\(items.prefix(5).joined(separator: ","))")
+            } catch {
+                let ns = error as NSError
+                ProbeLog.record("file.parent.list", "FAILED code=\(ns.code) <\(ns.localizedDescription)>")
             }
         } else {
             ProbeLog.record("file.url", "(nil)")

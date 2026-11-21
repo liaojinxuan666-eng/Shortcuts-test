@@ -28,13 +28,24 @@ enum ProbeLog {
         }
     }
 
+    /// **每次改代码就改这个字符串。** 日志里带着它，才能确定设备上跑的是哪一版——
+    /// 否则"新探针没输出"会被误读成"探针失败"，实际是旧二进制没被执行到。
+    static let buildTag = "v2-9probes"
+
     /// 记录"我是谁、在什么状态下被调用"——判断是前台还是后台触发，决定了
     /// 实验 7（自动化零点击）能不能成立。
+    ///
+    /// `container` 是容器 UUID。拿它跟 `file.url` 里的 UUID 一比，就能立刻回答
+    /// "Shortcuts 递给我的文件在我自己容器里，还是别人容器里"——这是两个完全不同的问题。
     static func recordContext(_ kind: String) {
         let b = Bundle.main
         let bid = b.bundleIdentifier ?? "?"
         let pid = ProcessInfo.processInfo.processIdentifier
-        record(kind, "bundle=\(bid) pid=\(pid) appState=\(appState)")
+        record(kind, "build=\(buildTag) bundle=\(bid) pid=\(pid) container=\(containerUUID) appState=\(appState)")
+    }
+
+    static var containerUUID: String {
+        (NSHomeDirectory() as NSString).lastPathComponent
     }
 
     static var appState: String {

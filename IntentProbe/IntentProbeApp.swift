@@ -23,8 +23,20 @@ struct ContentView: View {
                     .padding()
                     .textSelection(.enabled)
             }
-            .navigationTitle("Probe Log")
+            .navigationTitle("Probe Log · \(ProbeLog.buildTag)")
             .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    // 直接在 App 里跑一遍环境扫描。省掉"改快捷指令 → 跑 → 看日志"的往返，
+                    // 结果和从 Shortcuts 触发完全一致：同一个进程、同一个沙箱。
+                    Button {
+                        Task {
+                            _ = try? await ProbeSweepIntent().perform()
+                            reload()
+                        }
+                    } label: {
+                        Image(systemName: "bolt.horizontal")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     ShareLink(item: ProbeLog.url) {
                         Image(systemName: "square.and.arrow.up")

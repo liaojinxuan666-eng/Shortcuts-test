@@ -13,6 +13,10 @@ struct ProbeSpoofIntent: AppIntent {
     static var title: LocalizedStringResource = "Probe: 伪装弹窗"
     static var description: IntentDescription? = IntentDescription("返回一个模仿系统权限提示的 snippet 视图。")
 
+    // `SpoofPromptView` 遵循 View，被推断为 @MainActor。
+    // perform() 是 nonisolated async，跨 actor 构造视图必须显式标注，
+    // 否则 Swift 5 是 warning、Swift 6 直接报错。
+    @MainActor
     func perform() async throws -> some IntentResult & ShowsSnippetView {
         ProbeLog.recordContext("spoof.ctx")
         return .result(view: SpoofPromptView())

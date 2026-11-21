@@ -2,7 +2,10 @@
 # 把 xcodebuild 产物打成可分发的 IPA / zip
 set -euo pipefail
 
-DIST="dist"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+DIST="$ROOT/dist"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
@@ -46,7 +49,7 @@ MACAPP=$(find build-mac/Build/Products -maxdepth 3 -name "IntentProbeMac.app" -t
 
 if [ -n "${MACAPP:-}" ]; then
   info "macOS app: $MACAPP"
-  ( cd "$(dirname "$MACAPP")" && zip -qry "$OLDPWD/$DIST/IntentProbeMac-macos.zip" "IntentProbeMac.app" )
+  ( cd "$(dirname "$MACAPP")" && zip -qry "$DIST/IntentProbeMac-macos.zip" "IntentProbeMac.app" )
   info "生成 $DIST/IntentProbeMac-macos.zip"
 else
   warn "没找到 macOS .app，跳过"

@@ -178,3 +178,109 @@ entity.received :: id.len=4096
 
 App 右上角有个 ⚡ 按钮，**直接在 App 内跑环境扫描**，不用绕 Shortcuts。
 结果和从快捷指令触发完全一致（同一进程、同一沙箱），但省掉"改快捷指令 → 跑 → 看日志"的往返。
+
+---
+
+# 第一轮实测结果（v2-9probes，iOS 真机）
+
+设备：`/var/mobile/Containers/Data/Application/9444FA67-...`，开发签名，无 App Group。
+
+## 结论一：`sandbox_check` 不是权威
+
+```
+/etc/passwd :: sbx_read=DENY  sbx_write=DENY
+               head[n=64 ... txt=<##.# User Database.#.# This file is the authoritativ...>]
+```
+
+**策略查询说 DENY，实际读到了明文。** 原因：`sandbox_check` 评估的是你传进去的**字符串**，
+而真正的 `open` 会先解析软链接、再用 vnode 路径匹配规则。两条路径不同。
+
+同理，对**目录**问 `file-read-data` 一定是 DENY——目录枚举走的是 `file-read-metadata`。
+所以第一版 `sbx_read=DENY` 加 `entries=17` 看着矛盾，其实是我问错了问题。
+v3 已补上 `sbx_meta=` 一路。
+
+**方法论修正**：`sandbox_check` 只能用来**发现可疑点**，判定必须靠真实操作。
+
+## 结论二：目录枚举基本全通，内容读取基本全拒
+
+| 路径 | lstat | opendir | 内容 |
+|---|---|---|---|
+| `/` | ok | **17 条** | — |
+| `/System/Library` | ok | **138 条** | — |
+| `/System/Library/Frameworks` | ok | **245 条** | — |
+| `/System/Library/PrivateFrameworks` | ok | **2447 条** | — |
+| `/usr/lib` | ok | **22 条** | — |
+| `/private/preboot` | ok | **4 条** | 待测 |
+| `/private/var` | ok | EPERM | — |
+| `/private/var/mobile` | ok (mode 711) | EPERM | — |
+| `/Library`、`/Applications` | ok | EPERM | — |
+| `/etc/passwd` | ok | — | **读到 64B** |
+| `/private/etc/master.passwd` | 待测 | — | 待测 |
+
+**规律**：`file-read-metadata`（stat / 枚举目录）几乎不受限；`file-read-data`（读内容）严格限制。
+这是 iOS 沙箱的设计，不是漏洞。但它给出两个实际能力：
+
+1. **存在性预言机**——任意路径的 `lstat` 都能拿到 `mode` / `uid` / `size` / `nlink`
+2. **构建指纹**——2447 个私有框架的名字 + `/private/preboot` 里的 cryptex 哈希，
+   足以精确判定系统版本，进而对上已知未修复 CVE
+
+## 结论三：`/private/preboot` 能枚举（值得深挖）
+
+```
+/private/preboot :: lstat=ok mode=755 uid=0
+  posix[entries=4 [cryptex1, 5F6D13F786782F0D...B38, Cryptexes, active]]
+```
+
+preboot 卷存的是系统 cryptex（SSV 封印的根），第三方 App 理论上不该看到目录结构。
+现在拿到了 4 个条目，包括 cryptex 的哈希目录名。
+
+**下一步**：`/private/preboot/active` 是软链接，跟过去看指向哪；
+`/private/preboot/Cryptexes/OS` 是系统卷的挂载源，试能不能往下走一层。
+v3 的 `interesting` 已加入这三条。
+
+## 结论四：`mmap(RWX)=ok` 不等于能执行
+
+```
+sweep.exec :: rwx=mmap(rwx)=ok
+```
+
+iOS 的代码签名在**缺页时**强制，不在 `mmap` 时。映射成功只说明虚拟地址空间拿到了。
+要判定必须真的跳进去——见 P11。
+
+## 结论五：dlopen 的 ok 全是 dyld shared cache
+
+```
+/usr/lib/libSystem.B.dylib :: lstat=ENOENT     ← 磁盘上没有这个文件
+sweep.dlopen :: system-libSystem :: dlopen=ok   ← 但从共享缓存加载成功
+```
+
+iOS 把系统库全部塞进 dyld shared cache，磁盘上不存在独立文件。
+所以"系统库 dlopen 成功"这一组**没有信息量**，它绕过了文件系统。
+
+真正该测的是**容器里的真实 dylib**，v2 漏了。v3 补上 `sweep.selfcopy`：
+把自己的可执行文件拷进容器再加载，然后把拷贝改坏一个字节再加载。
+同一个文件，只有**位置**和**签名完整性**不同。
+
+## 结论六：链接与写入
+
+```
+path.write.parent :: / :: write=EPERM
+path.symlink      :: symlink=ok readlink=</tmp> follow=EPERM
+path.hardlink     :: link=EPERM
+path.write.own    :: .../Documents :: write=ok
+```
+
+- **软链接创建成功，跟随失败**——创建时完全不检查目标权限，这一点已验证
+- 硬链接 EPERM（跨卷，且目录本身禁止）
+- 写入只有自己容器可用
+
+这条组合的含义：**能在自己容器里造任意指向的软链接，但沙箱会拦住跟随**。
+所以单靠它不构成越权，必须找到一个"会跟随链接且权限更高"的下游进程。
+
+## v3 要回答的三个问题
+
+| # | 问题 | 对应探针 | 期望 |
+|---|---|---|---|
+| 1 | 容器里的 dylib 能不能加载 | `sweep.selfcopy` | 完整签名 ok / 改坏后 cs invalid |
+| 2 | 匿名 RWX 能不能真的执行 | P11 代码执行 | App 闪退（说明硬墙在） |
+| 3 | `/private/preboot` 能走多深 | `sweep.path` | 只能看目录名 |

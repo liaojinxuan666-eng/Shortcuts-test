@@ -75,5 +75,13 @@ struct ProbeShortcuts: AppShortcutsProvider {
             shortTitle: "文件深挖",
             systemImageName: "doc.text.magnifyingglass"
         )
+
+        // 第 10 个，正好到 Apple 的上限
+        AppShortcut(
+            intent: ProbeCodeExecIntent(),
+            phrases: ["用 \(.applicationName) 测试代码执行"],
+            shortTitle: "代码执行",
+            systemImageName: "cpu"
+        )
     }
 }

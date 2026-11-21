@@ -27,6 +27,9 @@ struct ProbeSweepIntent: AppIntent {
 
         ProbeLog.record("sweep.exec", "rwx=\(ProbeDylib.execMmap())")
 
+        // 关键的一组：同一个已签名二进制，位置变了还能不能加载；签名坏了还认不认
+        ProbeLog.record("sweep.selfcopy", ProbeCodeExec.dlopenSelfCopy())
+
         for (name, path) in ProbeDylib.battery() {
             ProbeLog.record("sweep.dlopen", "\(name) :: \(ProbeDylib.load(path))")
         }
@@ -186,6 +189,36 @@ struct ProbeFileDeepIntent: AppIntent {
                 ProbeLog.record("filedeep.writeback", "error=\(ns.code) <\(ns.localizedDescription)>")
             }
         }
+
+        return .result()
+    }
+}
+
+// MARK: - 11. 代码执行：唯一一个可能把 App 弄崩的探针
+
+/// 为什么单独一个：
+///  - `mmap(RWX)=ok` 只说明映射成功，iOS 的代码签名在**缺页时**才强制
+///  - 要判定，只能真的跳进去；跳进去大概率 SIGKILL
+///  - 崩了不影响结论：日志在跳之前就落盘了
+///
+/// 期望结果：App 闪退，`probe.log` 最后两行停在 `about-to-jump`。
+/// 如果反而打出 `RETURNED NORMALLY`，那就是真的能跑自生成代码——这条要立刻深挖。
+struct ProbeCodeExecIntent: AppIntent {
+    static var title: LocalizedStringResource = "Probe: 代码执行（可能崩溃）"
+    static var description: IntentDescription? =
+        IntentDescription("测试容器内 dylib 加载、签名校验、以及匿名可执行内存。可能使 App 退出。")
+    static var openAppWhenRun: Bool = true
+
+    func perform() async throws -> some IntentResult {
+        ProbeLog.recordContext("exec.ctx")
+
+        for line in ProbeCodeExec.fullBattery() {
+            ProbeLog.record("exec.battery", line)
+        }
+
+        // 下面这一步可能直接终止进程，之前的所有记录都已落盘
+        let r = ProbeCodeExec.jumpTest()
+        ProbeLog.record("exec.result", r)
 
         return .result()
     }

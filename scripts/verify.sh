@@ -24,8 +24,8 @@ done
 echo
 
 # ------------------------------------------------------------------ 源文件
-echo "=== 源文件（9 个，一个都不能少） ==="
-EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift"
+echo "=== 源文件（10 个，一个都不能少） ==="
+EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift ProbeCodeExec.swift"
 for f in $EXPECTED; do
   if [ -f "IntentProbe/$f" ]; then
     ok "IntentProbe/$f" "$(wc -c < "IntentProbe/$f" | tr -d ' ') bytes"
@@ -47,10 +47,10 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   fi
 
   n=$(git ls-files 'IntentProbe/*.swift' | wc -l | tr -d ' ')
-  if [ "$n" = "9" ]; then
-    ok "git 已跟踪 9 个 .swift"
+  if [ "$n" = "10" ]; then
+    ok "git 已跟踪 10 个 .swift"
   else
-    miss "git 只跟踪了 $n 个 .swift" "应为 9"
+    miss "git 只跟踪了 $n 个 .swift" "应为 10"
   fi
 else
   warn "当前目录不是 git 仓库"
@@ -68,7 +68,7 @@ fi
 
 if [ -d IntentProbe ]; then
   n=$(ls IntentProbe/*.swift 2>/dev/null | wc -l | tr -d ' ')
-  [ "$n" = "9" ] && ok "IntentProbe/ 下有 9 个 .swift" || miss "IntentProbe/ 下有 $n 个 .swift" "应为 9"
+  [ "$n" = "10" ] && ok "IntentProbe/ 下有 10 个 .swift" || miss "IntentProbe/ 下有 $n 个 .swift" "应为 10"
 fi
 echo
 

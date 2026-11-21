@@ -105,13 +105,15 @@ enum ProbeFS {
 
     static func sandboxVerdict(_ op: String, _ path: String) -> String {
         guard let fn = sandboxCheck else { return "unavailable" }
+        errno = 0
         let r: Int32 = op.withCString { o in
             path.withCString { p in fn(getpid(), o, 1, p) }
         }
+        let e = errno
         switch r {
         case 0:  return "allow"
         case 1:  return "DENY"
-        default: return "err(\(r))"
+        default: return "err(\(r),\(err(e)))"   // 带 errno，否则 -1 无法解释
         }
     }
 
@@ -217,6 +219,8 @@ enum ProbeFS {
 
         let st = statLine(path)
         var parts: [String] = [st]
+        // 对目录要问 file-read-metadata；问 file-read-data 一定是 DENY，那是问错了问题
+        parts.append("sbx_meta=\(sandboxVerdict("file-read-metadata", path))")
         parts.append("sbx_read=\(sandboxVerdict("file-read-data", path))")
         parts.append("sbx_write=\(sandboxVerdict("file-write-data", path))")
 
@@ -235,6 +239,9 @@ enum ProbeFS {
     // MARK: - 预置探测路径
 
     /// 挑的都是"理论上不该让我碰"的位置。全红是正常的，出现一个绿的就有意义。
+    ///
+    /// 第一轮实测后补充的几条：`/private/preboot` 竟然能枚举（4 个条目全拿到），
+    /// 所以把它的子路径也加进来，看是"只能看目录名"还是"能一路走下去"。
     static let interesting: [String] = [
         "/",
         "/System",
@@ -246,6 +253,7 @@ enum ProbeFS {
         "/bin/sh",
         "/etc/passwd",
         "/private/etc/passwd",
+        "/private/etc/master.passwd",
         "/private/var",
         "/private/var/mobile",
         "/private/var/mobile/Library",
@@ -254,7 +262,12 @@ enum ProbeFS {
         "/private/var/mobile/Containers/Data/Application",
         "/private/var/mobile/Containers/Shared/AppGroup",
         "/private/var/containers/Bundle/Application",
+        "/private/var/db",
         "/private/preboot",
+        "/private/preboot/active",
+        "/private/preboot/Cryptexes",
+        "/private/preboot/Cryptexes/OS",
+        "/System/Library/CoreServices/SystemVersion.plist",
         "/dev/null",
         "/dev/disk0",
         "/Library",

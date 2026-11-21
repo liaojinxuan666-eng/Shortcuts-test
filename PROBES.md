@@ -516,6 +516,22 @@ v5 第一次构建挂在 `_dyld_image_count` / `_dyld_get_image_name`，和 v4 �
 `_sandbox_*` 这类符号**只能出现在 dlsym 的字符串里**，出现裸调用就警告。
 推之前跑一遍，比等 CI 快 5 分钟。
 
+**v7 又栽了一次，同一类，第四次**：新建的 `ProbeFileCreate.swift` 只写了
+`import Darwin` / `import Foundation`，忘了 `import AppIntents`。CI 报的是
+
+```
+error: cannot find type 'AppIntent' in scope
+error: unknown attribute 'Parameter'
+error: cannot find type 'IntentResult' in scope
+```
+
+十几条，看着像整份代码崩了，其实只缺一行 import。共同点还是**只在
+`-sdk iphoneos` 下才暴露**——和缺符号是同一件事的两种形态：本地那套环境
+比目标环境宽松，所以"本地没报错"从来不构成证据。
+
+现在 `verify.sh` 加了对应的一条：任何文件只要出现 `: AppIntent`、`@Parameter`、
+`some IntentResult`，就必须有 `^import AppIntents`，否则直接判 MISS。
+
 ## 需要先定的一件事
 
 这台设备上量到的所有沙箱数据都不可用。两条路，选一条再往下走：

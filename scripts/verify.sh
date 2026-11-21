@@ -115,6 +115,24 @@ else
 fi
 echo
 
+# ------------------------------------------------------------------ AppIntents 依赖
+# 和上面那类错误同一性质：只在 -sdk iphoneos 编译时才炸。
+# 用了 AppIntent / @Parameter / IntentResult 却没 import AppIntents 的文件，
+# 报错是 "cannot find type 'AppIntent' in scope" + "unknown attribute 'Parameter'"，
+# 一次能刷出十几条，看着像全盘崩，其实只缺一行 import。
+echo "=== AppIntents 依赖（用了就必须 import） ==="
+noimp=0
+for f in IntentProbe/*.swift; do
+  if grep -qE '(:[[:space:]]*AppIntent\b|@Parameter|some IntentResult)' "$f"; then
+    if ! grep -qE '^import AppIntents' "$f"; then
+      miss "缺 import AppIntents" "$f"
+      noimp=1
+    fi
+  fi
+done
+[ "$noimp" = "0" ] && ok "全部已 import AppIntents"
+echo
+
 # ------------------------------------------------------------------ 结论
 if [ "$fail" = "1" ]; then
   echo "${RED}自检未通过${RST}：把上面标记 MISS 的文件补齐再推。"

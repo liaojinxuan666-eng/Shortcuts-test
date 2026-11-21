@@ -41,6 +41,11 @@ struct ProbeSweepIntent: AppIntent {
             ProbeLog.record("sweep.staged", line)
         }
 
+        // 换掉问题：不是"签名校不校验"，而是"哪里能可执行地映射一个文件"
+        for line in ProbeCodeExec.execMapMatrix() {
+            ProbeLog.record("sweep.execmap", line)
+        }
+
         for (name, path) in ProbeDylib.battery() {
             ProbeLog.record("sweep.dlopen", "\(name) :: \(ProbeDylib.load(path))")
         }

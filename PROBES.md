@@ -480,3 +480,109 @@ v5 第一次构建挂在 `_dyld_image_count` / `_dyld_get_image_name`，和 v4 �
 研究价值从"权限提升"转向"持久化 / 隐蔽性 / 供应链"。
 
 不选就继续跑，只会得到更多无法归因的绿色。
+
+---
+
+# v5 实测结果（重启后，build v5-staged-dylib）
+
+重启清掉了注入：`sweep.dyld :: count=550 injected=none`，`usedImages` 里
+dopamine 那条消失，`/usr/lib` 从 22 项变成 21 项（`systemhook.dylib` 没了）。
+
+## 结论十：我上一条的越狱结论是错的
+
+重启前后逐项对比：
+
+| 观测 | 越狱时 | 重启后（无注入） | 变了吗 |
+|---|---|---|---|
+| `injected` | systemhook.dylib | none | **变了** |
+| `/usr/lib` 条目数 | 22 | 21 | **变了** |
+| `/etc/passwd` 读前 64 字节 | 成功 | **成功** | 没变 |
+| `/System/Library/Frameworks` | 245 条 | **245 条** | 没变 |
+| `/private/preboot` | 4 条 | **4 条** | 没变 |
+| `/private/preboot/Cryptexes` | 3 条 | **3 条** | 没变 |
+| `sbx_*` | 全 DENY | **全 DENY** | 没变 |
+| `/bin/sh`、`/dev/disk0` 的 `err(-1,EFAULT)` | 有 | **有** | 没变 |
+
+越狱只贡献了 `systemhook.dylib` 和注入本身，**没有改变任何一条文件访问结果**。
+我上一条把这些绿色全判成"越狱给的"，判过头了。撤回。
+
+修正后的结论是更有意思的那一个：
+
+> **未越狱、普通签名的 App，在 iOS 18.5 上可以读 `/etc/passwd`、
+> 枚举 `/private/preboot` 和 `/System/Library/PrivateFrameworks`；
+> 而 `/private/var/mobile`、`/private/var/db`、`/private/var/containers` 一律 `opendir=EPERM`。**
+
+分界线不在"系统 vs 用户"，而在**系统侧 vs 用户数据侧**。系统分区本来就
+world-readable（755/644），沙箱只把用户数据圈起来。这不是漏洞，是设计；
+但它意味着"读系统文件"这一类结果**没有研究价值**，别再往那个方向挖。
+
+### 方法论修正：`sandbox_check` 不能当判据
+
+同一批路径上，`sandbox_check` 说 DENY，`open`/`read` 说成功，重启前后都是如此。
+所以不是被 hook，是**这个函数问的问题和内核实际判断的不是同一件事**
+（不展开 firmlink、不展开系统侧的 allow 规则）。以后判读只看 syscall 结果，
+`sandbox_check` 降级为"仅供参考"。
+
+## 结论十一：沙箱在 `file-map-executable` 先拦，签名校验根本没被问到
+
+```
+pick           :: /private/preboot/Cryptexes/OS/usr/lib/libobjc-trampolines.dylib size=68176
+dlopen(src)    :: dlopen=ok
+dlopen(intact) :: FAIL <file system sandbox blocked mmap() of '.../tmp/staged-intact.dylib'>
+dlopen(corrupt):: FAIL <file system sandbox blocked mmap() of '.../tmp/staged-corrupt.dylib'>
+```
+
+两次失败**原因完全相同**，而且都不是签名错。对照还是没有变量——但这次
+原因从"dyld 不认 MH_EXECUTE"变成了"沙箱不让映射"，这比签名问题更靠前一层。
+
+同时它独立验证了 v4 的 `sbx_exec=DENY`：容器内路径的 `file-map-executable` 是拒绝的。
+
+于是问题应该换成：**有没有哪个"我能写"的目录同时也允许 `file-map-executable`？**
+有 → 那就是代码执行的落点；没有 → 这条路闭合。v6 就是去测这个矩阵。
+
+## 结论十二：`mprotect(PROT_EXEC)` 返回 ok 也是谎，这次死在 CODESIGNING
+
+v5 的 jump 变成了完全不同的死法：
+
+| | v4 | v5 |
+|---|---|---|
+| 调用 | `mmap(RWX)` 直接跳 | `mmap(RWX)` → `mprotect(RX)` → 跳 |
+| `mprotect` 返回 | — | **ok** |
+| 区间保护位 | `rw-/rwx` | `r--/rw-` |
+| 终止方式 | `SIGNAL / SIGBUS` | **`CODESIGNING` / `Invalid Page`** |
+| 签名标志 | `VALID,REQUIRE_LV` | `VALID,HARD,KILL,REQUIRE_LV` |
+
+`mprotect(RX)` 返回 0，但结果区间是 `r--/rw-`：**X 没进去，连 max prot 里的 X 也没了**。
+然后取指 → 内核按 CODESIGNING 归类，`Invalid Page`，SIGKILL。
+
+这次有两个变量同时变了（我加了 mprotect；这一版签名带上了 `CS_HARD|CS_KILL`），
+**不能把死法差异归给其中任何一个**。但两条路都指向同一个结论：
+没有 X 的页，取指必死；死法取决于签名标志，不取决于调用方式。
+
+## 结论十三：v5 的"基线"其实是缓存命中
+
+```
+own-executable :: dlopen=ok dlsym(main)=0x...
+dlopen(src)    :: dlopen=ok
+```
+
+两条都是 `already-loaded`——`libobjc-trampolines.dylib` 本来就在 `usedImages` 里，
+主可执行文件更是。`dlopen` 对已加载的路径直接返回旧句柄，**不读文件、不验签**。
+所以这两条"ok"证明不了任何事。v6 在 `load()` 里加了 `isLoaded` 前置判断，
+输出区分 `dlopen=ok(loaded)` 和 `dlopen=ok(already-loaded)`。
+
+## v6 改了什么
+
+| 改动 | 为什么 |
+|---|---|
+| `execMapMatrix()` | 对每个可写目录：拷一个 dylib 进去 → 问 `file-map-executable` → 真 dlopen。找"能写 + 能执行映射"的交集 |
+| `control.bundle-exec` 正对照 | 必须先拿到一个 `allow`，否则"全是 DENY"什么也说明不了 |
+| `isLoaded()` 缓存命中标记 | 把"加载成功"和"早就加载了"分开 |
+| 源 dylib 优先挑未加载的 | 否则 dlopen 永远命中缓存 |
+
+## 下一步该问的
+
+1. **`execMapMatrix` 有没有一个 `sbx=allow` 的可写目录** —— 这是代码执行路线唯一还有希望的地方
+2. **Shortcuts 递进来的文件落在哪** —— 如果它不在我的容器里，那个位置的
+   `file-map-executable` 策略可能不一样。这是唯一还没被否掉的"绕过沙箱"入口
+3. 用户数据侧（`/private/var/mobile`）已经确认关闭，不用再试

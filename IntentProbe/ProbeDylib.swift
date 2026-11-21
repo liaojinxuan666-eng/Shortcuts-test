@@ -17,12 +17,17 @@ enum ProbeDylib {
     /// "no such file" = 沙箱或路径问题
     /// "code signature invalid" = 签名强制，说明沙箱已经放行了
     /// "not a mach-o file" = 走到了文件解析，说明前两层都过了
+    /// "file system sandbox blocked mmap()" = 卡在 `file-map-executable`，签名还没问
     static func load(_ path: String) -> String {
         guard !path.isEmpty else { return "skip(empty)" }
 
+        // **必须在 dlopen 之前判断。** dlopen 成功之后这个路径当然"已加载"，
+        // 那时再问就永远是 true，缓存命中和真实加载分不开。
+        let pre = isLoaded(path)
+
         _ = dlerror()   // 清掉上一条
         if let h = dlopen(path, RTLD_NOW) {
-            var s = "dlopen=ok"
+            var s = pre ? "dlopen=ok(already-loaded)" : "dlopen=ok(loaded)"
             if let sym = dlsym(h, "main") { s += " dlsym(main)=\(sym)" }
             dlclose(h)
             return s
@@ -127,5 +132,41 @@ enum ProbeDylib {
         }
         let list = sus.isEmpty ? "none" : sus.joined(separator: ",")
         return "count=\(n) injected=\(list)"
+    }
+
+    // MARK: - 这个路径是不是已经在进程里了
+
+    private static func canonical(_ p: String) -> String {
+        guard let r = realpath(p, nil) else { return p }
+        defer { free(r) }
+        return String(cString: r)
+    }
+
+    /// 图片数变了就重建。缓存只为了不每次都 realpath 550 条。
+    private static var imageSetCache: (n: UInt32, paths: Set<String>) = (0, [])
+
+    private static func imagePaths() -> Set<String> {
+        guard let count = imageCount, let nameAt = imageName else { return [] }
+        let n = count()
+        if imageSetCache.n == n { return imageSetCache.paths }
+        var s = Set<String>()
+        for i in 0..<n {
+            if let c = nameAt(i) { s.insert(canonical(String(cString: c))) }
+        }
+        imageSetCache = (n, s)
+        return s
+    }
+
+    /// 判定"这条路径的镜像是否已在进程内"。
+    ///
+    /// 为什么非要这个：`dlopen` 对**已加载**的路径直接返回旧句柄，不重新读文件、
+    /// 不重新验签。v5 里 `own-executable :: dlopen=ok` 和
+    /// `dlopen(src) :: dlopen=ok` 都是缓存命中——它们证明不了"这个文件能被加载"。
+    /// 不加这个标记，缓存命中会被当成"加载成功"，整组对照就白做了。
+    static func isLoaded(_ path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        let set = imagePaths()
+        if set.contains(path) { return true }          // 先比原串，省掉一次 realpath
+        return set.contains(canonical(path))
     }
 }

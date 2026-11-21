@@ -225,6 +225,73 @@ enum ProbeCodeExec {
         return v < 16 ? "0" + s : s
     }
 
+    // MARK: - 4：哪里能"可执行地映射一个文件"
+
+    /// v5 的结果把问题换掉了：
+    ///
+    /// ```
+    /// dlopen(intact)  :: FAIL <file system sandbox blocked mmap() of '.../tmp/staged-intact.dylib'>
+    /// dlopen(corrupt) :: FAIL <file system sandbox blocked mmap() of '.../tmp/staged-corrupt.dylib'>
+    /// ```
+    ///
+    /// 两次失败的原因**一模一样**，而且都不是签名错。也就是说沙箱在
+    /// `file-map-executable` 这一步就把路掐了，**签名校验根本没被问到**。
+    ///
+    /// 那么真正该问的问题变成了：**有没有哪个"我能写"的目录同时也允许
+    /// `file-map-executable`？** 有，那就是代码执行的落点；没有，这条路闭合。
+    ///
+    /// 所以这里对每个候选目录做同一件事：拷一个 dylib 进去 → 问策略 → 真加载。
+    /// 并且必须先拿到一个 `allow` 的正对照，否则"全是 DENY"什么也说明不了。
+    static func execMapMatrix() -> [String] {
+        var out: [String] = []
+
+        // 正对照：bundle 里的可执行文件。这一条如果也是 DENY，说明探针本身没工作
+        if let exec = Bundle.main.executablePath {
+            let v = ProbeFS.sandboxVerdict("file-map-executable", exec)
+            out.append("control.bundle-exec :: sbx=\(v)")
+        }
+
+        // 源：优先挑一个**还没被加载**的，否则 dlopen 全是缓存命中
+        var readable: [String] = []
+        for c in stagedCandidates() {
+            let fd = open(c, O_RDONLY)
+            if fd >= 0 { close(fd); readable.append(c) }
+        }
+        guard let src = readable.first(where: { !ProbeDylib.isLoaded($0) }) ?? readable.first else {
+            out.append("result :: 没有可读的 dylib，矩阵无法进行")
+            return out
+        }
+        out.append("src :: \(src) already_loaded=\(ProbeDylib.isLoaded(src))")
+
+        var dirs: [String] = [NSTemporaryDirectory()]
+        let wanted: [FileManager.SearchPathDirectory] =
+            [.documentDirectory, .libraryDirectory, .cachesDirectory]
+        for d in wanted {
+            if let u = FileManager.default.urls(for: d, in: .userDomainMask).first {
+                dirs.append(u.path)
+            }
+        }
+        // 只读位置也要试：写失败但策略可能是 allow，这个差值本身有信息
+        dirs.append(Bundle.main.bundlePath)
+        if let fw = Bundle.main.privateFrameworksPath { dirs.append(fw) }
+
+        let home = NSHomeDirectory()
+        for dir in dirs {
+            let dst = (dir as NSString).appendingPathComponent("execmap-probe.dylib")
+            let copied = copyFile(src, to: dst)
+            let writeStr = copied ? "ok" : "FAIL"
+            let sbx = ProbeFS.sandboxVerdict("file-map-executable", dst)
+            let short = dir.replacingOccurrences(of: home, with: "~")
+            var line = "\(short) :: write=\(writeStr) sbx=\(sbx)"
+            if copied {
+                line += " dlopen=\(ProbeDylib.load(dst))"
+                try? FileManager.default.removeItem(atPath: dst)
+            }
+            out.append(line)
+        }
+        return out
+    }
+
     // MARK: - 已证伪：拷贝自己的可执行文件
 
     /// 保留是因为它是**否定结果**的记录，而且它意外暴露了 dyld 的搜索路径：

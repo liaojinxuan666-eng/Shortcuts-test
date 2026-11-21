@@ -19,6 +19,11 @@ env:
   SCHEME: IntentProbe
   SCHEME_MAC: IntentProbeMac
 
+# 默认 token 多半是只读，upload-artifact / Release 都会 403
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   build:
     name: Build
@@ -36,6 +41,51 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks | grep -i -E "iphone|macos" || true
 
+      # 网页上传/zip 导入会丢失可执行位，统一修一次
+      - name: 修复脚本权限
+        run: |
+          chmod +x scripts/*.sh 2>/dev/null || true
+          chmod +x tools/*.py   2>/dev/null || true
+          ls -l scripts/ tools/ || true
+
+      - name: 预检（仓库结构 + 源文件清单）
+        run: |
+          set -uo pipefail
+          echo "=== 工作目录 ==="
+          pwd
+          echo
+          echo "=== 顶层内容 ==="
+          ls -la
+          echo
+          echo "=== git 跟踪的文件 ==="
+          git ls-files | sed 's/^/  /' || true
+          echo
+
+          EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift"
+          echo "=== 源文件逐项检查（应有 6 个） ==="
+          fail=0
+          for f in $EXPECTED; do
+            if [ -f "IntentProbe/$f" ]; then
+              printf "  OK    %-24s %6s bytes\n" "$f" "$(wc -c < "IntentProbe/$f" | tr -d ' ')"
+            else
+              printf "  MISS  %-24s\n" "$f"
+              fail=1
+            fi
+          done
+          echo
+          echo "=== IntentProbe/ 实际内容 ==="
+          ls -la IntentProbe/ 2>/dev/null || echo "  （目录不存在）"
+          echo
+
+          if [ "$fail" = "1" ]; then
+            echo "::error title=源文件不全::IntentProbe/ 下缺少上表标记为 MISS 的文件。"
+            echo "::error::常见原因：用网页逐个上传时漏了文件，或只拖了部分 .swift 进仓库。"
+            echo "::error::修复：从仓库根执行 —— git ls-files | grep IntentProbe"
+            echo "::error::确认 6 个 .swift 都在，缺的补上后 commit + push。"
+            exit 1
+          fi
+          echo "预检通过：6 个源文件齐全"
+
       - name: 安装 XcodeGen
         run: |
           if ! command -v xcodegen >/dev/null 2>&1; then
@@ -47,11 +97,6 @@ jobs:
         run: xcodegen generate
 
       # ------------------------------------------------------------ 签名材料探测
-      - name: 修复脚本权限
-        run: |
-          chmod +x scripts/*.sh 2>/dev/null || true
-          chmod +x tools/*.py   2>/dev/null || true
-
       - name: 探测签名材料
         id: probe
         env:
@@ -156,7 +201,7 @@ jobs:
 
       # ------------------------------------------------------------ 打包
       - name: 打包 IPA / App
-        run: ./scripts/make_ipa.sh
+        run: bash scripts/make_ipa.sh
 
       - name: 导出 App Intents 元数据（H3 研究素材）
         if: always()
@@ -176,7 +221,9 @@ jobs:
           fi
 
       # ------------------------------------------------------------ 产物
-      - name: 上传产物
+      # artifact 只是备份，失败不影响 Release
+      - name: 上传产物（artifact，best-effort）
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: IntentProbe-${{ github.sha }}
@@ -187,8 +234,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: 上传编译日志
+      - name: 上传编译日志（artifact，best-effort）
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-${{ github.sha }}
@@ -196,6 +244,73 @@ jobs:
             build.log
             build-mac.log
           if-no-files-found: ignore
+
+      # ------------------------------------------------------------ Release
+      - name: 发布到 Release
+        if: always() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+
+          IPA=$(ls dist/*.ipa 2>/dev/null | head -1 || true)
+          ZIP=$(ls dist/*.zip 2>/dev/null | head -1 || true)
+
+          if [ -z "$IPA" ] && [ -z "$ZIP" ]; then
+            echo "::warning::dist 下没有 ipa/zip，跳过 Release 发布"
+            ls -la dist 2>/dev/null || true
+            exit 0
+          fi
+
+          TAG="probe-latest"
+          SHORT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          WHEN=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          # 附件：安装包 + App Intents 元数据（H3 研究素材）
+          FILES=$(ls dist/*.ipa dist/*.zip 2>/dev/null || true)
+          META=$(find dist/metadata -type f 2>/dev/null | tr '\n' ' ' || true)
+
+          echo "=== 待上传 ==="
+          echo "$FILES"
+          echo "$META"
+
+          NOTES=$(cat <<EOF
+          **自动构建 · $WHEN**
+
+          | 项 | 值 |
+          |---|---|
+          | 提交 | \`$SHORT\` |
+          | 分支 | \`$GITHUB_REF_NAME\` |
+          | 签名 | 未签名（需自行 Sideloadly / AltStore / TrollStore 重签） |
+
+          ### 产物
+          - \`IntentProbe-unsigned.ipa\` — iOS 安装包（未签名）
+          - \`IntentProbeMac-macos.zip\` — macOS 版，改元数据后 \`codesign -s -\` 即可跑 H3 变异
+          - \`extract.actionsdata\` — Shortcuts 索引第三方 App 时解析的二进制 blob
+          - \`version.json\` — 元数据格式版本
+
+          > 装好后打开「快捷指令 → App 快捷指令」，能看到 5 个探针指令才算信任边界建立成功。
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，更新附件"
+            gh release edit "$TAG" --notes "$NOTES" --latest
+          else
+            echo "创建 Release $TAG"
+            gh release create "$TAG" \
+              --title "IntentProbe 最新构建" \
+              --notes "$NOTES" \
+              --latest
+          fi
+
+          # shellcheck disable=SC2086
+          gh release upload "$TAG" $FILES $META --clobber
+
+          echo
+          echo "=== 发布完成 ==="
+          gh release view "$TAG" --json url,assets \
+            --jq '.url, (.assets[] | "  \(.name)  \(.size) bytes")'
 
       - name: 摘要
         if: always()
@@ -213,4 +328,7 @@ jobs:
             echo ""
             echo "### Metadata.appintents"
             find dist/metadata -type f 2>/dev/null | head -20 || echo "（无）"
+            echo ""
+            echo "### Release"
+            echo "https://github.com/${{ github.repository }}/releases/tag/probe-latest"
           } >> "$GITHUB_STEP_SUMMARY"

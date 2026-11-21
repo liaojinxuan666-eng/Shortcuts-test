@@ -27,7 +27,13 @@ struct ProbeSweepIntent: AppIntent {
 
         ProbeLog.record("sweep.exec", "rwx=\(ProbeDylib.execMmap())")
 
+        // dlsym 能不能拿到 sys_icache_invalidate —— P11 的结论依赖这一条
+        let icache = ProbeCodeExec.icacheFlushAvailable ? "dlsym-ok" : "unavailable"
+        ProbeLog.record("sweep.icache", "sys_icache_invalidate=\(icache)")
+
         // 关键的一组：同一个已签名二进制，位置变了还能不能加载；签名坏了还认不认
+        // 调用前后各落一行 —— v3 整条缺失时无法区分「没跑到」和「跑到一半崩了」
+        ProbeLog.record("sweep.selfcopy", "about-to-run")
         ProbeLog.record("sweep.selfcopy", ProbeCodeExec.dlopenSelfCopy())
 
         for (name, path) in ProbeDylib.battery() {

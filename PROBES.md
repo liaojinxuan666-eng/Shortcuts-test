@@ -284,3 +284,73 @@ path.write.own    :: .../Documents :: write=ok
 | 1 | 容器里的 dylib 能不能加载 | `sweep.selfcopy` | 完整签名 ok / 改坏后 cs invalid |
 | 2 | 匿名 RWX 能不能真的执行 | P11 代码执行 | App 闪退（说明硬墙在） |
 | 3 | `/private/preboot` 能走多深 | `sweep.path` | 只能看目录名 |
+
+---
+
+# v4 修复记录（v4-selfcopy-trail）
+
+这一版没有加新探针，只修两处**会让结论失真**的问题。
+
+## 修复一：`sys_icache_invalidate` 编译不过
+
+CI 报：
+
+```
+ProbeCodeExec.swift:73:9: error: cannot find 'sys_icache_invalidate' in scope
+```
+
+这个符号声明在 `<libkern/OSCacheControl.h>`。macOS 的 Swift Darwin overlay 会
+把它带进来，**iOS 不会**——所以本地写起来没感觉，一上 `-sdk iphoneos` 就挂。
+
+两种修法，差别在"失败发生在哪一期"：
+
+| 修法 | 编译期 | 链接期 | 运行期 |
+|---|---|---|---|
+| `@_silgen_name("sys_icache_invalidate")` | 过 | **可能挂**（符号不在就给 undefined） | 正常 |
+| `dlsym` 运行时取 | 过 | 不依赖 | 取不到则退化为不刷新 |
+
+选 dlsym。理由不是"更优雅"，是**失败可观测**：`@_silgen_name` 一旦链接失败，
+拿到的是一个 `ld: symbol not found`，你还得再猜一轮；dlsym 取不到只会让
+`sweep.icache :: unavailable` 出现在日志里，实验照跑，结论打折但不丢。
+
+## 修复二：同一个路径 dlopen 两次会命中 dyld image 缓存
+
+v3 的写法是：拷到 `selfcopy.bin` → dlopen → 改坏同一个文件 → 再 dlopen。
+
+问题在第二步：**dyld 按 realpath 缓存已加载的 image**。第一次 dlopen 成功后，
+第二次对同一路径的调用很可能直接返回旧句柄，**根本不重新验签**。于是
+`dlopen_corrupt=ok` 会被读成"签名不校验"，而真相只是"没重新加载"。
+
+一个假阳性足以把整个结论反过来。改成两个文件名：
+
+```
+selfcopy-intact.bin   → dlopen_intact
+selfcopy-corrupt.bin  → dlopen_corrupt
+```
+
+两个文件都是刚拷的、都在容器里、都完整，唯一差别是其中一个被 XOR 了一个字节。
+
+## 修复三：崩溃点可归因
+
+v3 在设备上的日志里，`sweep.selfcopy` **整条不存在**。而"没跑到"和"跑到一半崩了"
+在日志上完全同形——这是设计缺陷，不是运气差。
+
+现在每一步前后各落一行 `selfcopy.step`：
+
+```
+selfcopy.step :: start
+selfcopy.step :: exec=/private/var/containers/Bundle/Application/.../IntentProbe
+selfcopy.step :: copy=ok dst=.../selfcopy-intact.bin size=...
+selfcopy.step :: about-to-dlopen intact
+selfcopy.step :: dlopen intact returned
+...
+```
+
+崩在哪一行，下一行就是死因的位置。同时 `sweep` 里调用前后也各补了一行
+`about-to-run`。
+
+## 附带：`/private/preboot` 子路径
+
+`interesting` 数组里已确认包含 `active` / `Cryptexes` / `Cryptexes/OS` 三条。
+v3 日志里没出现，最可能的原因就是**设备上跑的不是编译了这三条的二进制**——
+现在 `build=` 标记会直接回答这一点，先看它是不是 `v4-selfcopy-trail` 再判读其余内容。

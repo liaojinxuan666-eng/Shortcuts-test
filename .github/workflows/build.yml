@@ -47,6 +47,11 @@ jobs:
         run: xcodegen generate
 
       # ------------------------------------------------------------ 签名材料探测
+      - name: 修复脚本权限
+        run: |
+    chmod +x scripts/*.sh 2>/dev/null || true
+    chmod +x tools/*.py   2>/dev/null || true
+
       - name: 探测签名材料
         id: probe
         env:

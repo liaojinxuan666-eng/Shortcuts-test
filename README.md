@@ -5,7 +5,7 @@
 不逆向 Shortcuts，而是自己挂上去：看系统愿意把什么交给第三方 App、愿意替它做什么。
 
 > 配套文档：
-> - [`PROBES.md`](PROBES.md) —— **9 个探针各自回答什么问题、结果怎么判读**（先看这个）
+> - [`PROBES.md`](PROBES.md) —— **每个探针回答什么问题、结果怎么判读**（先看这个）
 > - [`EXPERIMENTS.md`](EXPERIMENTS.md) —— 5 个可证伪假设 + 8 个实验
 >
 > 上游背景：28 个 Shortcuts CVE 里 **0 个内存破坏漏洞**，全是 TCC / 路径 / 沙箱逻辑问题。
@@ -69,19 +69,27 @@ base64 -i profile.mobileprovision -o profile.b64
 
 ---
 
-## 探针列表（9 个）
+## 探针列表（14 个 intent，画廊里只放 10 个）
+
+`AppShortcutsProvider` 每个 App 上限 10 个，所以画廊里只有前 10 个；
+其余的不注册也能被快捷指令索引到（搜 App 名字即可）。
 
 | 探针 | 输入 | 回答的问题 |
 |---|---|---|
 | 接收文本 | String | 变量展开后 TCC 是否二次检查 |
+| 接收数组 | [String] | 数组展开与数量上限 |
 | 接收文件 | IntentFile | `fileURL` 指向哪里 |
 | 接收实体 | AppEntity | 标识符能否被持久化、长度上限 |
 | 接收链接 | URL | `file://` scheme 是否被拒 |
+| 输出文件 | 无 | 返回的 `filename` 能否穿越到容器外 |
 | 伪装弹窗 | 无 | Snippet 视图能否冒充系统提示 |
-| **环境扫描** | 无 | 容器、19 条系统路径、代码加载能力的全貌 |
+| 伪装对话框 | 无 | `ProvidesDialog` 这条 UI 通道长什么样 |
+| **环境扫描** | 无 | 容器、28 条系统路径、代码加载能力的全貌 |
 | **探测路径** | String 路径 | stat / 读 / 列 / 写 / 建链接，五件事一次问完 |
 | **加载动态库** | String 路径 | dlopen 卡在沙箱、签名、还是 W^X |
 | **文件深挖** | IntentFile | security-scope、父目录、兄弟文件、能否当 dylib 加载 |
+| **代码执行** | 无 | 匿名 RWX 到底能不能取指（**会让 App 退出**） |
+| **创建文件** | 目录/文件名/内容 | 写下来的字节落在一个什么策略的目录里 |
 
 判读方法见 [`PROBES.md`](PROBES.md)。
 
@@ -145,12 +153,17 @@ xcodebuild -project IntentProbe.xcodeproj -scheme IntentProbe \
 ├── .github/workflows/build.yml   CI：编译 + 签名 + 打包
 ├── project.yml                   XcodeGen 工程定义（不提交 .xcodeproj）
 ├── IntentProbe/
-│   ├── IntentProbeApp.swift      入口 + 日志查看界面
-│   ├── ProbeLog.swift            日志落盘 + 有毒标识符样本集
-│   ├── ProbeIntents.swift        6 个探针 intent（文本/数组/文件/URL/实体/输出文件）
+│   ├── IntentProbeApp.swift      入口 + 日志界面 + 工具栏两个一键按钮
+│   ├── ProbeLog.swift            日志落盘 + build 标记 + 有毒标识符样本集
+│   ├── ProbeIntents.swift        6 个输入边界 intent（文本/数组/文件/URL/实体/输出文件）
+│   ├── ProbeIntentsFS.swift      5 个沙箱 intent（扫描/路径/加载/文件深挖/代码执行）
+│   ├── ProbeFileCreate.swift     创建文件 + 可写目录矩阵（v7）
 │   ├── ProbeEntity.swift         AppEntity + 三个查询入口
-│   ├── ProbeSnippet.swift        伪装成系统弹窗的 snippet
-│   └── ProbeShortcuts.swift      AppShortcutsProvider（让 App 出现在画廊里）
+│   ├── ProbeSnippet.swift        伪装弹窗 + 对话框两条 UI 通道
+│   ├── ProbeShortcuts.swift      AppShortcutsProvider（画廊磁贴，上限 10 个）
+│   ├── ProbeFS.swift             三路探测：Foundation / POSIX / sandbox_check
+│   ├── ProbeDylib.swift          dlopen、匿名 RWX、注入镜像检测
+│   └── ProbeCodeExec.swift       代码执行决定性实验（会让进程退出）
 ├── Support/                      Info.plist（由 xcodegen 生成）
 ├── scripts/make_ipa.sh           打包脚本
 ├── tools/fuzz_metadata.py        extract.actionsdata 变异器

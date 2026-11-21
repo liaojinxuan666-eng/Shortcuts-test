@@ -5,6 +5,10 @@ set -uo pipefail
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
 fail=0
 
+# 源文件总数。改这里一处，下面三处检查跟着变——之前三处各写一个 10，
+# 加文件时漏改一个就会在 CI 里报"MISS 源文件不全"，排查半天。
+N=11
+
 ok()   { printf '  %sOK%s    %-34s %s\n' "$GRN" "$RST" "$1" "${2:-}"; }
 miss() { printf '  %sMISS%s  %-34s %s\n' "$RED" "$RST" "$1" "${2:-}"; fail=1; }
 warn() { printf '  %sWARN%s  %-34s %s\n' "$YEL" "$RST" "$1" "${2:-}"; }
@@ -24,8 +28,8 @@ done
 echo
 
 # ------------------------------------------------------------------ 源文件
-echo "=== 源文件（10 个，一个都不能少） ==="
-EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift ProbeCodeExec.swift"
+echo "=== 源文件（$N 个，一个都不能少） ==="
+EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift ProbeCodeExec.swift ProbeFileCreate.swift"
 for f in $EXPECTED; do
   if [ -f "IntentProbe/$f" ]; then
     ok "IntentProbe/$f" "$(wc -c < "IntentProbe/$f" | tr -d ' ') bytes"
@@ -47,10 +51,10 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   fi
 
   n=$(git ls-files 'IntentProbe/*.swift' | wc -l | tr -d ' ')
-  if [ "$n" = "10" ]; then
-    ok "git 已跟踪 10 个 .swift"
+  if [ "$n" = "$N" ]; then
+    ok "git 已跟踪 $N 个 .swift"
   else
-    miss "git 只跟踪了 $n 个 .swift" "应为 10"
+    miss "git 只跟踪了 $n 个 .swift" "应为 $N"
   fi
 else
   warn "当前目录不是 git 仓库"
@@ -68,7 +72,7 @@ fi
 
 if [ -d IntentProbe ]; then
   n=$(ls IntentProbe/*.swift 2>/dev/null | wc -l | tr -d ' ')
-  [ "$n" = "10" ] && ok "IntentProbe/ 下有 10 个 .swift" || miss "IntentProbe/ 下有 $n 个 .swift" "应为 10"
+  [ "$n" = "$N" ] && ok "IntentProbe/ 下有 $N 个 .swift" || miss "IntentProbe/ 下有 $n 个 .swift" "应为 $N"
 fi
 echo
 
@@ -91,6 +95,23 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
       echo "        修复：git update-index --chmod=+x $f"
     fi
   done
+fi
+echo
+
+# ------------------------------------------------------------------ iOS 不导出的符号
+# 这一类错误已经烧掉两轮 CI：macOS 的 Swift Darwin overlay 有，iOS 没有。
+# 本地看着能编，一上 -sdk iphoneos 就 "cannot find X in scope"。
+# 规则：只能出现在 dlsym 的字符串里，不能直接调用。
+echo "=== iOS 不导出的符号（必须走 dlsym） ==="
+BAD='sys_icache_invalidate|_dyld_[a-z_]+|_sandbox_[a-z_]+|_os_activity_[a-z_]+'
+hits=$(grep -rnE "($BAD)[[:space:]]*\(" IntentProbe/*.swift 2>/dev/null | grep -v '"' || true)
+if [ -n "$hits" ]; then
+  while IFS= read -r l; do
+    [ -n "$l" ] && warn "直接调用 iOS 不导出符号" "$l"
+  done <<< "$hits"
+  echo "        ${DIM}修法：dlsym(dlopen(nil, RTLD_NOW), \"符号名\")，别用 @_silgen_name${RST}"
+else
+  ok "没有直接调用" "全部在 dlsym 字符串里"
 fi
 echo
 

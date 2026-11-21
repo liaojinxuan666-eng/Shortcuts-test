@@ -108,6 +108,56 @@ filedeep.sibling  :: other.txt :: lstat=ok type=reg
 
 ---
 
+## 第三轮新增：创建文件
+
+### P12 · 创建文件（输入：目录 / 文件名 / 内容 / 拷贝源文件）
+
+**问：我写下来的字节，落在一个什么策略的目录里？**
+
+和 P7 的"写一次就删"不同，这里默认**把文件留在原地**。区别不是洁癖：
+
+| | P7 `writeProbe` | P12 `create` |
+|---|---|---|
+| 目的 | 有没有写权限 | 写下来的东西**还能不能被当成可执行映像** |
+| 文件 | 建完立刻 `unlink` | 默认保留，可以接着 `dlopen` |
+| 判据 | `open` 返回值 | `open` + 读回比对 + `dlopen` |
+
+三个参数决定它测什么：
+
+```
+目录 = file.parent 的输出        → 能不能在 Shortcuts 递给我的文件旁边埋东西
+拷贝源文件 = /usr/lib/libRPAC.dylib → 埋下去的那份还能不能被映射执行
+扫描候选目录 = 开                → 19 个目录一次过，看哪些能写
+```
+
+**输出长这样**：
+
+```
+create.target :: /var/mobile/.../tmp/probe-created.bin
+create.result :: pre=absent open=ok wrote=68176B fsync=ok
+                 stat[mode=644 uid=501 size=68176] readback=match
+                 sbx_create=DENY exec=DENY dlopen=FAIL <...file system sandbox blocked mmap()...>
+```
+
+**判读**，按顺序看，前一条不成立就不用看后一条：
+
+| # | 条件 | 说明 |
+|---|---|---|
+| 1 | `open=ok` | 目录可写。`pre=absent` 才算"新建"，`pre=exists` 只说明能覆盖 |
+| 2 | `readback=match` | 写进去的和读出来的一样。不一样才是异常 |
+| 3 | `exec=` | **只当参考**——`sandbox_check` 在这个 build 上连主可执行文件都答 DENY |
+| 4 | `dlopen=ok(loaded)` | **唯一有效判据**。`already-loaded` 不算，那是缓存命中 |
+
+矩阵模式下多一行 `summary :: writable=N/19`。基线是"自己的容器全绿、系统侧全红、
+bundle 负对照 FAIL"——负对照 FAIL 才说明上面那些绿不是探针在骗自己。
+
+**为什么 `/private/preboot/Cryptexes` 在名单里**：v6 扫出来它是 `mode=777 uid=0`。
+权限位已经允许任何人写，剩下的只有沙箱一层。整张表里只有它"只差一步"。
+
+**为什么这个探针不注册进 App 快捷指令画廊**：`AppShortcutsProvider` 每个 App
+上限 10 个，现在正好 10 个，再加一个会**构建失败**。`AppIntent` 不注册也能被
+快捷指令索引到，只是不在画廊里显示磁贴。App 内工具栏的文件夹按钮走的是同一条路径。
+
 ## 第一轮：输入边界（原有 5 个）
 
 | 探针 | 问题 | 已知结果 |
@@ -580,9 +630,79 @@ dlopen(src)    :: dlopen=ok
 | `isLoaded()` 缓存命中标记 | 把"加载成功"和"早就加载了"分开 |
 | 源 dylib 优先挑未加载的 | 否则 dlopen 永远命中缓存 |
 
+## 结论十四：v6 的 exec-map 矩阵作废——正对照自己就是 DENY
+
+```
+sweep.execmap :: control.bundle-exec :: sbx=DENY
+sweep.execmap :: src :: /usr/lib/libRPAC.dylib already_loaded=false
+sweep.execmap :: ~/tmp :: write=ok sbx=DENY dlopen=FAIL <file system sandbox blocked mmap()>
+```
+
+`control.bundle-exec` 是正对照：主可执行文件**一定**允许被映射执行，否则 App 根本起不来。
+它返回 `DENY`，只有两种解释——要么 `sandbox_check` 答不了 `file-map-executable`
+这个问题（主可执行文件是 dyld 在沙箱生效前映射的，事后再问策略，路径已经不在
+"可执行"白名单的语义里），要么这个函数整体坏了。
+
+无论哪种，结论都一样：**这组矩阵既不能证明能，也不能证明不能。**
+v6 之前定下的判读规则（"全是 DENY 而正对照 allow → 路线闭合"）没有被满足，
+所以 v6 什么也没关掉。这是我自己写的规则，我自己没遵守。
+
+`staged.step :: copy FAIL 513` 顺带解释了另外两行：513 是 `NSFileWriteNoPermissionError`，
+bundle 只读、`Frameworks/` 压根不存在。对一个 `write=FAIL` 的目录拿 `sbx=DENY`
+去解释没有意义——文件都不存在。
+
+## 结论十五：崩溃报告给出了比矩阵更硬的答案——max prot 里没有 X
+
+v6 的 jump 死法和 v5 一样是 `CODESIGNING / Invalid Page`，但报告细节不一样：
+
+| 字段 | 值 |
+|---|---|
+| `vmRegionInfo` | `VM_ALLOCATE 0x102850000-0x102854000 [16K] r--/rw- SM=PRV` |
+| thread 1 `esr` | `(Instruction Abort) Permission fault` |
+| thread 1 `pc` / `far` | 都等于 `0x102850000` |
+| `termination` | `CODESIGNING` / `Invalid Page`，`SIGKILL` |
+| `codeSigningFlags` | `VALID,HARD,KILL,REQUIRE_LV` |
+
+`r--/rw-` 是 `PRT/MAX`：**当前保护位 `r--`，上限 `rw-`**。上限里就没有 X。
+
+这比 v4 那次硬。v4 是 `rw-/rwx`（上限有 X、当前没有），还能解释成"mprotect 没生效"；
+现在上限本身没有 X，意味着 `mmap(PROT_EXEC)` 返回成功时，内核已经把 EXEC 从
+max prot 里抹掉了，`mprotect(RX)` 返回 0 只是把同一个谎重复一遍——它不可能
+授予一个 max prot 不允许的位。
+
+三件事同时成立：取指 fault 的地址 == mmap 的地址（`pc == far`）、fault 类型是
+**instruction abort / permission fault**（不是缺页、不是对齐）、区间上限不含 X
+且被 AMFI 归类为 `Invalid Page`。
+
+**没有 `dynamic-codesigning` entitlement，匿名页的 maxprot 永远不含 X。**
+这条路不是被沙箱关的，是被 VM 层关的。改调用顺序、换 `mprotect` 时机、用 `MAP_JIT`
+都绕不过去，因为要改的是 max prot，而它由 entitlement 决定。
+
+## v7 改了什么：加"创建文件"
+
+代码执行路线闭合之后，能问的问题换了一层：不是"我能不能执行自己的代码"，
+而是"**我能不能把文件放到一个别人会执行的位置**"。两件事的判据完全不同。
+
+| 新增 | 为什么 |
+|---|---|
+| `ProbeFileCreate.create()` | `open`→`write`→`fsync`→`fstat`→**读回比对**。只信 `write` 的返回值会把配额耗尽、只读卷读成成功 |
+| `createAndReport()` | 建完立刻问 `file-map-executable` 并**真 dlopen**。判据是 dlopen，不是 `sandbox_check` |
+| `matrix()` | 19 个候选目录各建一份，输出 `writable=N/19`。基线 = 自己容器全绿 + 系统侧全红 + bundle 负对照 FAIL |
+| `resolve()` | 相对路径按**容器根**解析，不按 cwd。App 的 cwd 是 `/`，让它解释相对路径只会得到看不懂的 ENOENT |
+| `/private/preboot/Cryptexes` 进名单 | v6 扫出它是 `mode=777 uid=0`，权限位已放行，只差沙箱一层 |
+| App 工具栏加文件夹按钮 | 矩阵有 19 个目录，来回改快捷指令参数太慢；同进程同沙箱，结论等价 |
+
+**没做的事**：没注册进 `AppShortcutsProvider`。上限 10 个，现在正好 10 个，
+第 11 个会构建失败。`AppIntent` 不注册也能被快捷指令索引到，只是不在画廊里显示磁贴。
+
 ## 下一步该问的
 
-1. **`execMapMatrix` 有没有一个 `sbx=allow` 的可写目录** —— 这是代码执行路线唯一还有希望的地方
-2. **Shortcuts 递进来的文件落在哪** —— 如果它不在我的容器里，那个位置的
-   `file-map-executable` 策略可能不一样。这是唯一还没被否掉的"绕过沙箱"入口
-3. 用户数据侧（`/private/var/mobile`）已经确认关闭，不用再试
+1. **`create.matrix` 的 `writable=N/19` 是多少** —— 自己的容器应该 7/19（tmp、
+   Documents、Library、Caches、home、Preferences、Application Support），
+   系统侧应该 0，bundle 负对照必须 FAIL。这三条不成立就是探针有问题，先修探针
+2. **`/private/preboot/Cryptexes` 能不能写** —— 唯一一个 777 目录。能写的话，
+   接着看那份 dylib 的 `dlopen` 结果
+3. **Shortcuts 递进来的文件落在哪** —— 把 `filedeep.parent` 填进 P12 的"目录"，
+   直接问"能不能在它旁边埋东西"。这是唯一还没被否掉的入口
+4. 用户数据侧（`/private/var/mobile`）已确认关闭、`sandbox_check` 已确认不可信，
+   这两条都不用再试

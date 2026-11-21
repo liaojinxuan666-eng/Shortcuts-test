@@ -38,6 +38,18 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    // 一键扫"哪些目录我能写"。和走快捷指令完全等价（同进程同沙箱），
+                    // 但省掉改快捷指令的往返——矩阵有 19 个目录，来回改参数太慢。
+                    Button {
+                        Task {
+                            _ = try? await ProbeCreateFileIntent(matrix: true).perform()
+                            reload()
+                        }
+                    } label: {
+                        Image(systemName: "folder.badge.plus")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     ShareLink(item: ProbeLog.url) {
                         Image(systemName: "square.and.arrow.up")
                     }

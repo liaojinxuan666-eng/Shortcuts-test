@@ -856,7 +856,51 @@ open(已存在的文件, O_WRONLY)            // 不创建，只问写
 所以全部退回 `@Parameter(title:default:)`——这个形式在 v6 里编过。
 说明挪进标题和 `///` 注释，代价是快捷指令里标签长一点，换掉一次可能的构建失败。
 
-还有一处没验证：`OpenURLIntent(url)` 和 `.result(opensIntent:)` 的具体签名。
-如果 CI 报 `cannot find 'OpenURLIntent' in scope` 或
-`extra argument 'opensIntent'`，就说明这版 SDK 上名字不同，
-把 `ProbeHandoffIntent` 退回 `UIApplication.open` 即可，其余不受影响。
+## 结论十八：`OpenURLIntent` 的名字和签名是对的，版本门槛没对
+
+CI 第一轮报了两条，其实是**两个独立的错**，只是撞在同一行：
+
+```
+ProbeSystemApp.swift:270:37: error: 'OpenURLIntent' is only available in iOS 18.0 or newer
+ProbeSystemApp.swift:257:10: error: function declares an opaque return type 'some IntentResult',
+    but the return statements in its body do not have matching underlying types
+```
+
+**第一条是好消息。** 编译器没报 `cannot find 'OpenURLIntent' in scope`、也没报
+`extra argument 'opensIntent'`——说明这两个 API 的名字和签名我猜对了，唯一的问题是
+部署目标写的是 17.0，而这个类型 18.0 才有。上一条笔记里那句"如果报错就退回
+`UIApplication.open`"因此作废：不需要退，只是要挂 `@available`。
+
+**第二条是真 bug，和版本无关。** `some IntentResult` 是不透明返回类型，
+函数体里每个 `return` 的底层类型必须完全一致：
+
+| 写法 | 底层类型 |
+|---|---|
+| `.result()` | `IntentResultContainer<Never, Never, Never, Never>` |
+| `.result(opensIntent:)` | `IntentResultContainer<Never, OpenURLIntent, Never, Never>` |
+
+原来的 `guard let url = ... else { return .result() }` 让两条路径类型不同，
+就算 `OpenURLIntent` 可用也会报错。改法不是加 `if #available`（那只会把
+两条分支都留下、错得更明显），而是**只留一条 return**：URL 解析失败时
+用一个必然打不开的 `file://` 兜底，把 `parsed=invalid` 写进日志。
+
+这两条合起来说明一件事：`@available` 要挂在**类型**上，不能挂在函数体分支上。
+挂在 `struct` 上，`perform()` 里就只剩一种可用性上下文，返回类型也只剩一种。
+
+**同一类错误的第五次**，但形态又变了：第一次是缺符号（`sys_icache_invalidate`），
+第二次还是缺符号（`_dyld_*`），第四次是缺 import（`AppIntents`），
+这次是**缺版本门槛**。共同点一次没变：**只在 `-sdk iphoneos` 下暴露，
+本地永远看不出来**。所以 `verify.sh` 又长了一条：
+
+```
+=== iOS 版本门槛（部署目标 17.0） ===
+  OK    18.0 专属 API 都挂了 @available
+```
+
+规则：非注释行里出现 `OpenURLIntent`，文件里就必须有 `@available(iOS 18`。
+以后再引入 18.0 专属 API，把符号名加进那个 `for sym in` 列表即可。
+
+**一个备用方案**：如果 AppIntents 的元数据提取（`appintentsmetadataprocessor`）
+对 `@available` 门控的 intent 报错，就把 iOS 部署目标从 17.0 提到 18.0——
+探针跑在 18.5 上，提上去没有任何功能损失。这一步没做，因为它是全局改动，
+而 `@available` 是局部改动；先试小的。

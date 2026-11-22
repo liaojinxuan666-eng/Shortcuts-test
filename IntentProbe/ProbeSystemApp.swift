@@ -241,6 +241,11 @@ struct ProbeSystemAppIntent: AppIntent {
 ///
 /// 如果第二条真的把快捷指令拉起来了，而第一条没有，那说明**"从 intent 返回值
 /// 交出去"比"从 App 调 open"权限更大**。这是一个可以被证伪的具体命题。
+///
+/// `OpenURLIntent` 是 iOS 18 才有的类型，而本工程的部署目标是 17.0。
+/// 整个 struct 挂 `@available` 而不是在函数体里写 `if #available`——后者会让
+/// 两条分支的返回类型不同，见 `perform()` 里的注释。
+@available(iOS 18.0, *)
 struct ProbeHandoffIntent: AppIntent {
     static var title: LocalizedStringResource = "Probe: 交给系统打开"
     static var description: IntentDescription? =
@@ -259,14 +264,20 @@ struct ProbeHandoffIntent: AppIntent {
         ProbeLog.record("handoff.url", "<\(target)>")
         ProbeLog.record("handoff.state", "before-return=\(ProbeLog.appState)")
 
-        guard let url = URL(string: target) else {
-            ProbeLog.record("handoff.result", "url=invalid，交不出去")
-            return .result()
-        }
+        // 只留一条 return 路径。`some IntentResult` 是不透明返回类型，
+        // 所有 return 的底层类型必须一致：
+        //   .result()                  → IntentResultContainer<Never,Never,Never,Never>
+        //   .result(opensIntent: ...)  → IntentResultContainer<Never,OpenURLIntent,Never,Never>
+        // 混着写会报 "return statements in its body do not have matching
+        // underlying types"。所以 URL 非法时给一个必然失败的 scheme，
+        // 而不是提前 return 一个空结果。
+        let parsed = URL(string: target)
+        let url = parsed ?? URL(fileURLWithPath: "/probe-invalid-handoff")
 
         // 日志先落盘：系统接管之后这个进程可能立刻被挂起，
         // 返回之后再写就来不及了。
-        ProbeLog.record("handoff.result", "returned-to-system url=\(url.scheme ?? "-")")
+        ProbeLog.record("handoff.result",
+                        "returned-to-system url=\(url.scheme ?? "-") parsed=\(parsed == nil ? "invalid" : "ok")")
         return .result(opensIntent: OpenURLIntent(url))
     }
 }

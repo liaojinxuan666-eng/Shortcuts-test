@@ -133,6 +133,26 @@ done
 [ "$noimp" = "0" ] && ok "全部已 import AppIntents"
 echo
 
+# ------------------------------------------------------------------ iOS 版本门槛
+# 第五次同类错误，换了第三种形态：既不是缺符号，也不是缺 import，而是
+# 用了比部署目标更新的 API。部署目标是 17.0，`OpenURLIntent` 是 18.0 才有，
+# 报错 "'OpenURLIntent' is only available in iOS 18.0 or newer"。
+# 这类错误本地照样看不出来——只要不按 iphoneos 编就永远不出现。
+echo "=== iOS 版本门槛（部署目标 17.0） ==="
+avail=0
+for f in IntentProbe/*.swift; do
+  for sym in OpenURLIntent; do
+    # 只数非注释行：文档里提到这个名字不算使用
+    n=$(grep -n "$sym" "$f" 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*//' | wc -l | tr -d ' ')
+    if [ "$n" != "0" ] && ! grep -qE '@available\(iOS 18' "$f"; then
+      miss "用了 $sym 却没挂 @available(iOS 18" "$f"
+      avail=1
+    fi
+  done
+done
+[ "$avail" = "0" ] && ok "18.0 专属 API 都挂了 @available"
+echo
+
 # ------------------------------------------------------------------ 结论
 if [ "$fail" = "1" ]; then
   echo "${RED}自检未通过${RST}：把上面标记 MISS 的文件补齐再推。"

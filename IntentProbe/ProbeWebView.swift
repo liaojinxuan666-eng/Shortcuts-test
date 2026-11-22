@@ -59,6 +59,11 @@ final class WebProbe: NSObject, ObservableObject {
 
     private var web: WKWebView?
 
+    /// 这一发有没有任何 delegate 回调。
+    /// 20 次 `web.load` 零回调那轮，就是靠它才定位到"导航压根没开始"。
+    private var sawCallback = false
+    private var watchdog: DispatchWorkItem?
+
     /// 只建一次。每次重建会丢掉 WKWebView 的进程池，加载会明显变慢，
     /// 而且旧实例的 delegate 回调会晚到，把新的读数盖掉。
     func webView() -> WKWebView {
@@ -83,20 +88,59 @@ final class WebProbe: NSObject, ObservableObject {
 
         headline = "加载中…"
         detail = u.absoluteString
+        sawCallback = false
+
+        let w = webView()
 
         // 这一行要在 load 之前落盘：file:// 的失败可能发生在很早期的
         // WebContent 启动阶段，晚一点写就可能等不到。
         ProbeLog.record("web.load",
                         "url=<\(u.absoluteString)> scheme=\(u.scheme ?? "-") "
                         + "isFile=\(u.isFileURL) root=\(root.rawValue) "
-                        + "rootpath=<\(root.url?.path ?? "-")>")
+                        + "rootpath=<\(root.url?.path ?? "-")> "
+                        + "frame=\(Int(w.frame.width))x\(Int(w.frame.height)) "
+                        + "inWindow=\(w.window != nil)")
 
-        let w = webView()
         if u.isFileURL, let r = root.url {
-            w.loadFileURL(u, allowingReadAccessTo: r)
+            // `loadFileURL(_:allowingReadAccessTo:)` 要求文件**在读取根之下**。
+            // 不满足时这个调用是无效的——不是"被拒绝"，是参数本身没意义。
+            // 上一轮 12 次 `/private/etc/passwd` 配 `documents` 根就是这种空转，
+            // 却和真正的失败混在了一张表里。这里显式分开。
+            let fp = u.standardizedFileURL.path
+            let rp = r.standardizedFileURL.path
+            if fp.hasPrefix(rp.hasSuffix("/") ? rp : rp + "/") || fp == rp {
+                w.loadFileURL(u, allowingReadAccessTo: r)
+            } else {
+                ProbeLog.record("web.root-mismatch",
+                                "file=<\(fp)> root=<\(rp)> note=file-not-under-root-fallback-to-request")
+                w.load(URLRequest(url: u))
+            }
         } else {
             w.load(URLRequest(url: u))
         }
+
+        armWatchdog(w)
+    }
+
+    /// 1.5 秒还没有任何回调，就把当时的状态拍下来。
+    ///
+    /// 这一条是给"零回调"那种失败准备的：它不报错、不崩溃、界面上就是一片空白，
+    /// 只看 `web.load` 会以为是自己没点到。上一轮 20 次全栽在这里。
+    private func armWatchdog(_ w: WKWebView) {
+        watchdog?.cancel()
+        let item = DispatchWorkItem { [weak self, weak w] in
+            guard let self = self, let w = w else { return }
+            guard !self.sawCallback else { return }
+            ProbeLog.record("web.silent",
+                            "note=no-delegate-callback-after-1.5s "
+                            + "isLoading=\(w.isLoading) "
+                            + "url=<\(w.url?.absoluteString ?? "-")> "
+                            + "frame=\(Int(w.frame.width))x\(Int(w.frame.height)) "
+                            + "inWindow=\(w.window != nil)")
+            self.headline = "无回调 · 导航没开始"
+        }
+        watchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: item)
     }
 
     /// 读回渲染结果。**这一步才是"真的读到了"的证据**——
@@ -121,6 +165,7 @@ final class WebProbe: NSObject, ObservableObject {
     }
 
     private func fail(_ error: Error, phase: String) {
+        sawCallback = true
         let e = error as NSError
         // 错误码能分清三种失败，别混着读：
         //   257 NSURLErrorNoPermissionsToReadFile        → 读不到，权限/沙箱
@@ -140,10 +185,12 @@ extension WebProbe: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView,
                  didStartProvisionalNavigation navigation: WKNavigation!) {
+        sawCallback = true
         ProbeLog.record("web.start", "url=<\(webView.url?.absoluteString ?? "-")>")
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        sawCallback = true
         ProbeLog.record("web.finish", "url=<\(webView.url?.absoluteString ?? "-")>")
         readback(webView)
     }
@@ -224,7 +271,13 @@ struct WebProbeSheet: View {
 
                 Divider()
 
+                // 必须给显式尺寸。上一版这里只有 `WebProbeContainer()`，
+                // 在 VStack 里塌成 0×0；而 WKWebView 尺寸为 0 时不会启动
+                // WebContent 进程，`loadFileURL` 只是把导航排进队列然后永远不动。
+                // 表现就是：web.load 写了，web.start/finish/fail 一条都没有，也不崩。
                 WebProbeContainer()
+                    .frame(minHeight: 240, maxHeight: .infinity)
+                    .background(Color(.secondarySystemBackground))
             }
             .navigationTitle("内置 WebView")
             .navigationBarTitleDisplayMode(.inline)

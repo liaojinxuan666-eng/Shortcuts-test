@@ -81,6 +81,15 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    // mach 服务可达性矩阵。18 个目标 × 1.2 秒，大约 22 秒跑完，
+                    // 结果直接进日志（每行一条 xpc.probe，末尾一条 xpc.summary）。
+                    Button {
+                        XPCProbe.shared.runAll()
+                    } label: {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     ShareLink(item: ProbeLog.url) {
                         Image(systemName: "square.and.arrow.up")
                     }

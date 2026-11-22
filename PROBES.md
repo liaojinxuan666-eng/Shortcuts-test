@@ -1453,3 +1453,69 @@ Shortcuts 拿到 name、找到快捷指令、**跑完了**（否则不会有"1 �
 
 第 2 条是这一组唯一有信息量的地方。前面几轮在 Safari 上打 `file://` 全是
 `inert`，那不是"被拒绝"，是"没人接"。换成自己渲染，才第一次真的去读。
+
+---
+
+## v13 那轮 WebView：20 次 load，0 次回调
+
+### 读数
+
+```
+web.load      20
+web.start      0
+web.finish     0
+web.fail       0
+web.js         0
+```
+
+跨了两个进程（pid 2226 / 2241），20 次全部零回调。
+
+### 这说明什么
+
+**导航压根没开始**，不是"file:// 被拒绝"。所以这一轮对
+"沙箱能不能读系统文件"这个问题的信息量是 **0**——工具没转起来。
+
+差点犯的错：把这轮读成"file:// 这条路死了，转 XPC 吧"。
+那和 v10 的 `open_accepted=3/21`、v11 的 `inert` 标签是同一类错误：
+**拿坏掉的仪器得出的否定结论**。
+
+### 两个原因，都是我的
+
+1. **容器尺寸 0×0。** `VStack { ...; Divider(); WebProbeContainer() }` 里
+   没有 frame，`UIViewRepresentable` 会塌成 0。WKWebView 尺寸为 0 时不启动
+   WebContent 进程，`loadFileURL` 只是把导航排进队列，然后永远不动。
+   表现正是"load 写了、回调一条没有、也不崩"。
+
+2. **`loadFileURL` 的包含关系没检查。** 这个 API 要求文件**在读取根之下**。
+   20 次里有 12 次是 `/private/etc/passwd` 配 `documents`/`container` 根，
+   文件根本不在根里。这种调用是空转，不是"被系统拒绝"。
+   却和真正的失败混在同一张表里——又是一个"两种不同的事共用一个标签"。
+
+### v14 的修法
+
+| 改动 | 为什么 |
+|---|---|
+| 容器 `.frame(minHeight: 240, maxHeight: .infinity)` | 0 尺寸不启动 WebContent |
+| `web.load` 里带 `frame=` 和 `inWindow=` | 下次一眼能看出是不是又塌了 |
+| 包含关系检查，不在根下就记 `web.root-mismatch` 并退回 `load(URLRequest)` | 参数错误和系统拒绝必须分开 |
+| 1.5 秒看门狗，没回调就记 `web.silent` + 当时状态 | 零回调这种失败不报错不崩溃，只能靠主动拍快照 |
+
+## v14 同时加了 XPC 可达性矩阵
+
+工具栏天线按钮，18 个目标，每个 lookup 一次 + 发一个空字典，约 22 秒。
+
+**预期是一堵墙**：mach-lookup 归沙箱 profile 管，第三方 App 的 profile 里
+没有放行项，也没有对应 entitlement。全表大概率 `Connection invalid`。
+
+测它的价值不在"打通"，在**把边界钉死**——和 mmap(RWX) 的 max prot、
+AMFI、`file:` 那几条一样，负结果本身就是能引用的结论。
+
+判词三档，不能合并：
+
+| verdict | 含义 |
+|---|---|
+| `denied` | 收到 `CONNECTION_INVALID`，lookup 被拒/服务不存在 |
+| `silent` | 1.2 秒内没有任何事件。**没收到 INVALID 说明 lookup 大概率成功了**，只是服务不理会空消息 |
+| `replied` | 真的回了字典/字符串，这个服务可达 |
+
+`silent` 算成失败会低估可达面，算成成功会高估。必须单列。

@@ -22,6 +22,10 @@ struct ContentView: View {
     @State private var customPrefix: String = "x-safari-https"
     @State private var lastCustom: String = "-"
 
+    /// 内置 WebView 的开关。file:// 那条线在外面（Safari）是死路，
+    /// 只能拿到"网址无效"；要量"本 App 能不能读"，得自己渲染。
+    @State private var showWebProbe = false
+
     @Environment(\.scenePhase) private var scenePhase
 
     private let refreshTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
@@ -68,6 +72,15 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    // 自己渲染 URL。`open` 那条路只能递给 Safari，
+                    // 而 Safari 对 file: 一律判"网址无效"，量不到 sandbox 边界。
+                    Button {
+                        showWebProbe = true
+                    } label: {
+                        Image(systemName: "globe")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     ShareLink(item: ProbeLog.url) {
                         Image(systemName: "square.and.arrow.up")
                     }
@@ -85,6 +98,9 @@ struct ContentView: View {
                 reload()
             }
             .onReceive(refreshTimer) { _ in reload() }
+            .sheet(isPresented: $showWebProbe) {
+                WebProbeSheet()
+            }
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active else { return }
                 Task { @MainActor in

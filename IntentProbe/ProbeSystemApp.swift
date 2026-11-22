@@ -594,6 +594,18 @@ enum SysAppRunner {
         let t = q[i]
         guard let u = URL(string: t.url) else { return }
 
+        // 上一发还没结案就再来一发：`pending` 只有一个槽，后一发会直接覆盖前一发，
+        // 前一发的 `sysapp.open` 永远不落盘。
+        // 01:56:50 那轮就是这么丢的——`idx=2/6` 的 fire 写了，open 没有，
+        // 紧接着 idx=3 的 fire 就上来了（`became-active` 和手点撞在一起）。
+        // 丢掉的那行不是"没发生"，是"发生了但没人记"，比没有更糟。
+        guard pending == nil else {
+            ProbeLog.record("sysapp.busy",
+                            "run=\(runId) idx=\(i + 1)/\(n) label=\(t.label) "
+                            + "trigger=\(trigger) note=skip-inflight")
+            return
+        }
+
         // 先落盘再调用：进程可能立刻被挂起，回调不一定等得到。
         // 这条 `fire` 行就是"确实在 active 下发出去了"的凭证。
         ProbeLog.record("sysapp.fire",

@@ -61,12 +61,17 @@ enum ProbeSystemApp {
         let note: String
         /// 重点组：真正值得为它多点一次的。
         let priority: Bool
+        /// 层：`legacy`（手写的对照与老目标）/ `A` / `B`（语料库）。
+        /// 分层的意义见 `ProbeCorpus` 的注释：点击预算有限，先花在后果最大的那一层。
+        let tier: String
 
-        init(_ label: String, _ url: String, _ note: String, priority: Bool = false) {
+        init(_ label: String, _ url: String, _ note: String,
+             priority: Bool = false, tier: String = "legacy") {
             self.label = label
             self.url = url
             self.note = note
             self.priority = priority
+            self.tier = tier
         }
     }
 
@@ -74,7 +79,9 @@ enum ProbeSystemApp {
     ///
     /// 每个 URL 都带 `?probe=<label>`（能带的都带），这样任何一张截图都能自证身份——
     /// v10 就是栽在这上面：屏幕上那个 example.com 到底是哪个目标开的，说不清。
-    static let all: [Target] = [
+    /// v11–v14 手写的那张表：两组对照 + 几个历史上出过事的入口。
+    /// **对照永远留在这里**，不管跑哪一层都要先跑它——没有对照，下面几十行读数全是浮点。
+    static let legacy: [Target] = [
         // ---- 对照：这两行不过，整张表作废 ----
         Target("control.https",
                "https://example.com/?probe=control.https",
@@ -150,8 +157,34 @@ enum ProbeSystemApp {
                + "这就是 accepted≠worked 的实物标本"),
     ]
 
+    // MARK: - 语料库接线（v15）
+
+    /// 跑任何一层之前先跑它。三行，缺一行整张表就读不出来：
+    ///
+    ///  - `control.https` —— 正对照。它不通，说明这套装置本身坏了（v13 的 WebView 就是这样）
+    ///  - `control.bogus` —— 负对照。它通了，说明「accepted」这个词没有意义
+    ///  - `safari.x-https` —— **声明门槛的探针**。v10 测到它未声明却 canOpen=true，
+    ///    v14 测到它未声明却真把 Safari 拉起来了（`launched=yes away=0.85s`）。
+    ///    有它在，`canOpen` 那一列才能区分「没 handler」和「被声明门槛挡了」——
+    ///    否则 settings-navigation 全 false，你分不清是 Apple 没注册还是我没声明。
+    static var controls: [Target] {
+        let wanted = ["control.https", "control.bogus", "safari.x-https"]
+        return wanted.compactMap { w in legacy.first { $0.label == w } }
+    }
+
+    static let corpusA: [Target] = ProbeCorpus.tierA.map {
+        Target($0.label, $0.url, $0.note, tier: "A")
+    }
+    static let corpusB: [Target] = ProbeCorpus.tierB.map {
+        Target($0.label, $0.url, $0.note, tier: "B")
+    }
+
+    /// 全量 = 手写表 + 语料库。只用于导出清单，**别拿它当默认跑法**：
+    /// 80 多条里每条被接受的都要人手点一次返回。
+    static let all: [Target] = legacy + corpusA + corpusB
+
     static func targets() -> [Target] { all }
-    static var priorityTargets: [Target] { all.filter(\.priority) }
+    static var priorityTargets: [Target] { legacy.filter(\.priority) }
 
     // MARK: - 自定义 URL 的前缀表
 
@@ -274,8 +307,22 @@ enum SysAppRunner {
         set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.mode) }
     }
 
+    /// 队列按模式拼。**每一层都先跑对照**：`control.https` 不通，后面的 accepted 全不可信。
+    ///
+    /// | mode | 队列 | 点击预算 |
+    /// |---|---|---|
+    /// | `control` | 2 组对照 | 1 次 |
+    /// | `A` | 对照 + 28 条「一步之内改安全状态」 | ≤30 次 |
+    /// | `B` | 对照 + 28 条「有价值但改不了」 | ≤30 次 |
+    /// | `legacy` | v11–v14 手写表 | 6–22 次 |
     static var queue: [ProbeSystemApp.Target] {
-        mode == "all" ? ProbeSystemApp.all : ProbeSystemApp.priorityTargets
+        switch mode {
+        case "control": return ProbeSystemApp.controls
+        case "A":       return ProbeSystemApp.controls + ProbeSystemApp.corpusA
+        case "B":       return ProbeSystemApp.controls + ProbeSystemApp.corpusB
+        case "legacy":  return ProbeSystemApp.legacy
+        default:        return ProbeSystemApp.all
+        }
     }
 
     static var cursor: Int {
@@ -336,6 +383,12 @@ enum SysAppRunner {
         // 队列顺序也落盘：日志里只写 idx=3/6 的话，事后没人知道第 3 个是什么。
         ProbeLog.record("sysapp.queue",
                         "run=\(runId) order=\(queue.map(\.label).joined(separator: ">"))")
+
+        // canOpen 是同步的、无副作用的，一次把整列打出来。零成本，但它是
+        // 「没 handler」和「被声明门槛挡了」之间唯一的区分手段（见 `controls` 的注释）。
+        for line in ProbeSystemApp.canOpenLines(queue).lines {
+            ProbeLog.record("sysapp.canopen", "run=\(runId) \(line)")
+        }
     }
 
     static func stop() {

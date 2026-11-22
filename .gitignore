@@ -25,3 +25,6 @@ variants/
 *.cer
 *.pem
 *.b64
+
+# 上游数据集（942KB），由 tools/build_corpus.py 按需拉取
+corpus/source/

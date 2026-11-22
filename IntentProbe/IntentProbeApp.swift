@@ -271,7 +271,7 @@ struct ContentView: View {
                 Button(done ? "再来一轮" : (armed ? "继续" : "开始")) {
                     Task { @MainActor in
                         if !armed || done {
-                            SysAppRunner.reset(to: "priority")
+                            SysAppRunner.reset(to: "A")
                             await SysAppRunner.fireNext(trigger: "bar-start")
                         } else {
                             await SysAppRunner.fireNext(trigger: "bar-tap")
@@ -288,16 +288,47 @@ struct ContentView: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             } else if !armed {
-                Text("6 个重点目标，一次发一个。每次都在前台发起，读数才有效。")
+                Text("A 层 28 条：一步之内能改设备安全状态的系统面板。一次发一个，发完会切走，点回来继续。")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 8) {
-                Button("全量 22 个") {
+                Button("A 层 28") {
                     Task { @MainActor in
-                        SysAppRunner.reset(to: "all")
-                        await SysAppRunner.fireNext(trigger: "bar-all")
+                        SysAppRunner.reset(to: "A")
+                        await SysAppRunner.fireNext(trigger: "bar-A")
+                        reload()
+                    }
+                }
+                .font(.system(size: 10))
+                .buttonStyle(.bordered)
+
+                Button("B 层 28") {
+                    Task { @MainActor in
+                        SysAppRunner.reset(to: "B")
+                        await SysAppRunner.fireNext(trigger: "bar-B")
+                        reload()
+                    }
+                }
+                .font(.system(size: 10))
+                .buttonStyle(.bordered)
+
+                Button("对照 2") {
+                    Task { @MainActor in
+                        SysAppRunner.reset(to: "control")
+                        await SysAppRunner.fireNext(trigger: "bar-control")
+                        reload()
+                    }
+                }
+                .font(.system(size: 10))
+                .buttonStyle(.bordered)
+
+                // 已安装 App 清单 + openSensitiveURL 试射。纯读，一次跑完，
+                // 但最后那次试射会把进程切走——所以它必须是这个按钮里最后一件事。
+                Button("清单") {
+                    Task { @MainActor in
+                        ProbeAppInventory.runAll()
                         reload()
                     }
                 }

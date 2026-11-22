@@ -78,9 +78,26 @@ final class XPCProbe: ObservableObject {
         let desc: FnDesc
     }
 
+    /// 三个来源依次试，**不要只写死路径**。
+    ///
+    /// v14 就是栽在这上面：`dlopen("/usr/lib/libxpc.dylib")` 返回 nil，
+    /// 于是整张矩阵一行都没跑，日志里只有三行 `libxpc-symbols-missing`。
+    /// 原因不是「libxpc 不可用」，而是 iOS 17 之后 `/usr/lib` 下的实体文件
+    /// 基本被抽空了——同一次 sweep 里 `/usr/lib` 只列出 21 个条目，
+    /// 连 `/usr/lib/libSystem.B.dylib` 都是 `lstat=ENOENT`。
+    /// 真身都在 dyld shared cache 里，只有 install name 能命中。
+    ///
+    /// 所以顺序是：先在**已加载镜像**里找符号（RTLD_DEFAULT），
+    /// 再用 install name dlopen，最后才回退到路径。
     private static func loadAPI() -> API? {
-        guard let h = dlopen("/usr/lib/libxpc.dylib", RTLD_LAZY) else { return nil }
-        func sym(_ n: String) -> UnsafeMutableRawPointer? { dlsym(h, n) }
+        func lookup(_ n: String) -> UnsafeMutableRawPointer? {
+            if let p = dlsym(UnsafeMutableRawPointer(bitPattern: -2), n) { return p }  // RTLD_DEFAULT
+            for name in ["libxpc.dylib", "/usr/lib/libxpc.dylib", "libxpc.A.dylib"] {
+                if let h = dlopen(name, RTLD_LAZY), let p = dlsym(h, n) { return p }
+            }
+            return nil
+        }
+        func sym(_ n: String) -> UnsafeMutableRawPointer? { lookup(n) }
         guard let c  = sym("xpc_connection_create_mach_service"),
               let eh = sym("xpc_connection_set_event_handler"),
               let rs = sym("xpc_connection_resume"),
@@ -152,7 +169,11 @@ final class XPCProbe: ObservableObject {
 
     private func runSerial() async {
         guard let api = XPCProbe.loadAPI() else {
-            ProbeLog.record("xpc.api", "note=libxpc-symbols-missing path=/usr/lib/libxpc.dylib")
+            // 三个来源都试过还是缺，才下这个结论。附带把 /usr/lib 的实际情况记下来，
+            // 免得下一轮又以为是「路径写错了」。
+            ProbeLog.record("xpc.api",
+                            "note=libxpc-symbols-missing tried=RTLD_DEFAULT,libxpc.dylib,/usr/lib/libxpc.dylib "
+                            + "hint=ios17+_usr_lib_is_mostly_dyld_cache")
             publish("libxpc 符号缺失")
             running = false
             return

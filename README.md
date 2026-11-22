@@ -106,8 +106,20 @@ v6（`injected=none`）和 v8（`injected=systemhook`）是同一份 exec 代码
 | **文件深挖** | IntentFile | security-scope、父目录、兄弟文件、能否当 dylib 加载 |
 | **代码执行** | 无 | 匿名 RWX 到底能不能取指（**会让 App 退出**） |
 | **创建文件** | 目录/文件名/内容 | 写下来的字节落在一个什么策略的目录里 |
-| **交给系统 App** | 模式 | 19 个 scheme 的 canOpen / open 差值，交接后进程去向 |
+| **交给系统 App** | 模式 | 21 个 scheme 的 canOpen / open 差值，交接后进程去向 |
 | **交给系统打开** | URL | 由系统执行 open，不是我的进程（`opensIntent`） |
+
+App 内三个工具栏按钮，和走快捷指令等价（同进程同沙箱），省掉改参数来回：
+
+| 图标 | 跑什么 | 说明 |
+|---|---|---|
+| 闪电 | 环境扫描 | 容器 + 28 条路径 + 代码加载能力 |
+| 文件夹 | 可写目录矩阵 | 19 个目录，`writable=N/19` |
+| 纸飞机 | 系统 App 交接 | 21 个 scheme，`canopen_true=N open_accepted=M` |
+
+纸飞机是唯一能触发 `ProbeSystemApp` 的入口——它没注册进画廊（上限 10 个），
+之前四版日志里 `sysapp.*` 一直是 0 行。跑的时候每 open 一次本进程就被切走，
+所以第一行是前台发起、后面都是后台发起，`before=` 会写清楚。
 
 判读方法见 [`PROBES.md`](PROBES.md)。
 
@@ -171,7 +183,7 @@ xcodebuild -project IntentProbe.xcodeproj -scheme IntentProbe \
 ├── .github/workflows/build.yml   CI：编译 + 签名 + 打包
 ├── project.yml                   XcodeGen 工程定义（不提交 .xcodeproj）
 ├── IntentProbe/
-│   ├── IntentProbeApp.swift      入口 + 日志界面 + 工具栏两个一键按钮
+│   ├── IntentProbeApp.swift      入口 + 日志界面 + 工具栏三个一键按钮
 │   ├── ProbeLog.swift            日志落盘 + build 标记 + 有毒标识符样本集
 │   ├── ProbeIntents.swift        6 个输入边界 intent（文本/数组/文件/URL/实体/输出文件）
 │   ├── ProbeIntentsFS.swift      5 个沙箱 intent（扫描/路径/加载/文件深挖/代码执行）

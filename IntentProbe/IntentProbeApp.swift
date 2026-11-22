@@ -50,6 +50,22 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    // 一键把 21 个 URL 交给系统 App。这是唯一能真正触发
+                    // ProbeSystemApp 的入口——它没注册进 AppShortcutsProvider
+                    // （上限 10 个，画廊满了），从快捷指令里搜得到但很难找。
+                    //
+                    // 注意：每 open 一次本进程就被切走，所以第一行是前台发起、
+                    // 后面都是后台发起。`before=` 字段会自己写清楚。
+                    Button {
+                        Task {
+                            _ = await ProbeSystemApp.runAll(origin: "foreground")
+                            reload()
+                        }
+                    } label: {
+                        Image(systemName: "paperplane")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     ShareLink(item: ProbeLog.url) {
                         Image(systemName: "square.and.arrow.up")
                     }

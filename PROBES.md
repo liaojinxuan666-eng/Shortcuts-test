@@ -188,7 +188,7 @@ sysapp.mode  :: mode=<open>
 sysapp.open  :: control.https :: before=background after=background open=no-callback
 sysapp.open  :: control.bogus :: before=background after=background open=refused
 sysapp.open  :: shortcuts.run :: before=background after=background open=no-callback
-sysapp.summary :: accepted=2/19
+sysapp.summary :: origin=foreground canopen_true=6/21 open_accepted=2/21
 ```
 
 **判读**（前一条不成立，后一条就不用看）：
@@ -210,6 +210,24 @@ sysapp.summary :: accepted=2/19
 **前置条件**：`LSApplicationQueriesSchemes` 里没声明的 scheme，`canOpenURL`
 一律返回 false——**哪怕目标 App 装着**。所以 false 不能读成"没装"。
 反过来，`open()` 不需要声明也能用，这个不对称本身就是 P13 的一条读数。
+
+**怎么跑（v10 才有的入口）**：App 工具栏的纸飞机按钮，一次跑完 canOpen + open。
+之前它只以 `AppIntent` 形式存在，而 `AppShortcutsProvider` 上限 10 个、画廊已满，
+所以从来没有被触发过——四版日志里 `sysapp.*` 一直是 **0 行**。工具存在 ≠ 工具被用过。
+
+App 内跑会引入一个必然的混淆，别试图消除它：
+
+> 每 `open` 一次，本进程就被切到后台。**第一行是前台发起，之后都是后台发起。**
+
+`before=` 每行都写，自己就能分开读；真要纯前台基线，就一次只跑一个目标。
+另外用 `beginBackgroundTask` 多要了约 30 秒，并把轮询压到 3 拍（300ms）——
+切走的第一步是 `inactive`，300ms 足够，再多只是白等。
+
+**四个 Safari 入口**：`safari.web-search`（`x-web-search://`）、
+`safari.x-https`（`x-safari-https://`）、`safari.file`（`file://`）、
+`safari.data`（`data:`）。前两个是"能不能让 Safari 替我搜/打开"，
+后两个是历史上真正被利用过的两个方向。`safari.x-https` 和 `control.https`
+放一起对比，就知道私有写法是不是等价物。
 
 ## 第一轮：输入边界（原有 5 个）
 
@@ -833,7 +851,7 @@ open(已存在的文件, O_WRONLY)            // 不创建，只问写
 
 | 新增 | 为什么 |
 |---|---|
-| `ProbeSystemApp.targets()` | 19 个 scheme，正负对照排最前 |
+| `ProbeSystemApp.targets()` | 21 个 scheme，正负对照排最前，含 4 个 Safari 入口 |
 | `canOpenMatrix()` | 只问不做。单独看没有信息量，价值全在跟 `open` 对比 |
 | `openMatrix()` | 真交出去，同时记 `before/after` appState 与回调状态 |
 | `ProbeHandoffIntent` | 返回 `opensIntent: OpenURLIntent`，由**系统**执行 |
@@ -904,3 +922,162 @@ ProbeSystemApp.swift:257:10: error: function declares an opaque return type 'som
 对 `@available` 门控的 intent 报错，就把 iOS 部署目标从 17.0 提到 18.0——
 探针跑在 18.5 上，提上去没有任何功能损失。这一步没做，因为它是全局改动，
 而 `@available` 是局部改动；先试小的。
+
+## 结论十九：这次"不闪退了"，原因是越狱，不是漏洞
+
+v8 的 exec 第一次返回正常：
+
+```
+exec.jump :: icache_flush=true ptr=0x00000001017d4000 opcode=ret
+exec.jump :: about-to-jump
+exec.jump :: RETURNED NORMALLY —— 匿名可执行内存真的可用
+exec.result :: jump=ok(returned) mprotect=ok icache_flush=true
+```
+
+同一份日志的第一行给出了原因：
+
+```
+sweep.dyld :: count=551 injected=/private/preboot/5F6D13F7.../dopamine-iHw65x/procursus/basebin/systemhook.dylib
+```
+
+对比 v6 / v7：
+
+```
+v6/v7: sweep.dyld :: count=550 injected=none
+v8   : sweep.dyld :: count=551 injected=.../dopamine-iHw65x/.../systemhook.dylib
+```
+
+**两条独立信号指向同一件事**，不是单点读数：
+
+| 信号 | 干净（v6/v7） | 越狱（v8） |
+|---|---|---|
+| dyld 镜像数 | `count=550` | `count=551`，多出的那个是 systemhook |
+| `/usr/lib` 条目 | 21 条 | 22 条，多出 `systemhook.dylib` |
+| `injected=` | `none` | `.../dopamine-iHw65x/.../systemhook.dylib` |
+
+第二条尤其重要：它不依赖 dyld 枚举，是文件系统层面的旁证。镜像表多一个、目录多一个，恰好都是 systemhook——这不是巧合能解释的。
+
+### 这是一次受控对比，不是相关性猜测
+
+| | v6 | v8 |
+|---|---|---|
+| `exec.jump` 代码 | 同一份 | 同一份 |
+| 设备 | iPhone11,6 / 18.5 | iPhone11,6 / 18.5 |
+| `mmap(RWX)` | ok | ok |
+| `mprotect(RX)` | ok | ok |
+| **`injected=`** | **none** | **systemhook** |
+| 跳转结果 | SIGKILL / `Invalid Page` | 正常返回 |
+
+唯一变化的可观测变量是 `injected=`。所以正确表述是：
+
+> **匿名可执行内存在这台越狱设备上可用；这不能推广到未越狱的 iOS。**
+
+`systemhook` 干的事正是给进程打补丁、让 AMFI 不再对缺页做签名校验——它拆的就是结论十五里那堵墙（max prot 不含 X，由 `dynamic-codesigning` entitlement 决定）。也就是说 v6 的结论没有被推翻：**墙是真的，是越狱把墙拆了**，而不是"墙本来就不存在，之前测错了"。
+
+### 沙箱那堵墙没倒，这才是这组数据里最干净的一条
+
+同一份日志里，沙箱的表现一点没变：
+
+```
+sweep.staged :: dlopen(intact) :: dlopen=FAIL <file system sandbox blocked mmap() of '<tmp>/staged-intact.dylib'>
+sweep.execmap :: ~/tmp :: write=ok sbx=DENY dlopen=FAIL <... file system sandbox blocked mmap() ...>
+create.matrix :: summary :: writable=6/19
+create.matrix :: bundle(负对照) :: open=EPERM
+```
+
+越狱状态下、同一个进程里：
+
+| 墙 | 越狱前 | 越狱后 | 结论 |
+|---|---|---|---|
+| 匿名页取指（AMFI / 页表 NX） | 挡 | **放行** | systemhook 拆了 |
+| 从自己容器 `dlopen`（sandbox `file-map-executable`） | 挡 | **仍挡** | 没动 |
+
+两堵墙是**独立**的。这一条以前只能推断（"可能是两层"），现在有差分实测。顺带说明：Dopamine 这类 systemhook 主要补的是代码签名/AMFI 路径，不负责给 App 解沙箱 profile，所以容器内的 `file-map-executable` 限制照旧。
+
+### `sandbox_check` 第三次被判死，这次是决定性的
+
+```
+sweep.execmap :: control.bundle-exec :: sbx=DENY
+```
+
+这台设备上，主可执行文件的代码**正在运行**——它百分之百允许被映射执行。`sandbox_check` 仍然答 `DENY`。前两次（v6 正对照失败、v7 与 syscall 矛盾）还能辩解成"这个 build 更严"；现在环境反过来帮它作弊（墙已被拆），它还是答 DENY。
+
+**结论：这个函数答不了 `file-map-executable` 这个问题。** 不是严，是坏。以后任何用它当判据的结论一律作废，包括 v6 那张矩阵。
+
+### v4 那次不能回溯解释
+
+v4 的区间是 `rw-/rwx`（上限含 X），和 v6 的 `r--/rw-` 不同，当时我据此说"重启推翻了越狱假设"。现在看，v4 **根本没有 `injected=` 这一行**，它跑在什么环境里是未知的。给它补一个"当时是越狱/当时不是越狱"的解释，都是事后编故事——这正是这一轮要避免的错误，方向反过来而已（上次把越狱当结论，这次差点把越狱的功劳当发现）。
+
+能说的只有：`max prot` 含 X 是必要条件，不是充分条件。v4 有 X 却仍崩，说明当时还有别的东西在拦（比如 icache 没刷、或 `mprotect` 生效时序）。这条留作开放问题，不结案。
+
+### 协议变更：环境标签进日志
+
+这一轮之后，`env=` 是每条 `*.ctx` 的固定字段：
+
+```
+sweep.ctx :: build=v9-env env=clean bundle=com.probe.intentprobe pid=... appState=active
+sweep.ctx :: build=v9-env env=jailbroken(systemhook.dylib) bundle=... appState=active
+```
+
+`exec.jump` 的判词也不再由那行代码决定，而是由环境决定：
+
+| 环境 | 日志 |
+|---|---|
+| clean | `RETURNED NORMALLY —— env=clean，匿名可执行内存真的可用` |
+| 越狱 | `RETURNED NORMALLY —— 但 jailbroken(systemhook.dylib)，不构成 finding` |
+
+判据写在 `ProbeEnv` 里，两条信号（dyld 镜像表 + bootstrap 落盘文件）分开失效，所以都留着。`exec.env` 那一行在跳转**之前**落盘——进程随后被 SIGKILL 也留得下归属。
+
+### 下一步：把相关变成因果
+
+现在只差一步就能把"越狱导致"从相关升级成因果：**同一台设备重启（越狱失效，`injected` 回到 `none`），再跑一次 exec**。
+
+| 重启后结果 | 含义 |
+|---|---|
+| 又崩在 `Invalid Page` | 同机同码前后对照成立，"越狱拆墙"从相关变因果 |
+| 仍然正常返回 | `injected=none` 不足以证明环境干净，得再找第三条信号 |
+
+这个 A/B 不需要改代码，只需要一次重启和一次点击。它比再加任何新探针都值钱——因为它检验的是**判据本身**。
+
+## 结论二十：A/B 做成了——墙是真的，越狱是唯一变量
+
+v9 那次重启之后：
+
+```
+sweep.ctx :: build=v9-env env=clean ...            ← injected 回到 none
+exec.env  :: env=clean → 结果可以当成 iOS 的行为
+exec.jump :: about-to-jump
+（没有下一行）
+```
+
+三份日志拼起来，是一个完整的前后对照：
+
+| | v6 | v8 | v9 |
+|---|---|---|---|
+| `injected=` | `none` | `systemhook` | `none` |
+| `env=` | —（当时还没这个字段） | `jailbroken(systemhook.dylib)` | `clean` |
+| 跳转 | SIGKILL / `Invalid Page` | 正常返回 | SIGKILL / `Invalid Page` |
+
+同机、同码、同一个 `mmap(RWX)` 返回值，结果随 `injected` 翻转，并且**翻转回去了**。
+这比单次的"越狱时成功"强得多：如果 v9 仍然正常返回，就说明 `injected=none`
+不足以证明环境干净，判据本身要重写。它没有——判据成立。
+
+所以代码执行这条线，最终状态是：
+
+> 未越狱 iOS 上，匿名可执行页不可用（max prot 无 X，AMFI 兜底）。
+> 这是设计，不是缺陷。越狱能拆，但那是越狱的能力，不是 App 的。
+
+## v10 改了什么：让"交给系统 App"真的能跑
+
+一句话：**功能早就写好了，但四版日志里 `sysapp.*` 出现 0 次。**
+
+| 新增 | 为什么 |
+|---|---|
+| 工具栏纸飞机按钮 | `ProbeSystemApp` 没注册进 `AppShortcutsProvider`（上限 10 个），从快捷指令里搜得到但很难找，结果就是从来没跑过 |
+| `runAll(origin:)` | canOpen + open 一次跑完，输出一行 `canopen_true=N/21 open_accepted=M/21` |
+| `beginBackgroundTask` | 每 open 一次本进程就被切走，后台约 30 秒会被挂起，21 个目标跑不完 |
+| 轮询降到 3 拍 | 切走的第一步是 `inactive`，300ms 足够；10 拍会让整轮慢到被挂起 |
+| `safari.web-search` / `safari.x-https` | 用户真正问的是"Safari 能不能替我做"，原来表里只有 `file:` 和 `data:` 两个负面样本 |
+
+`canOpenMatrix` 顺手拆成 `canOpenLines() -> (lines, yes)`，
+矩阵和计数共用一份实现，避免"表里数着 6 个 true、summary 写 5"这种漂移。

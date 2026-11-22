@@ -108,6 +108,14 @@ enum ProbeSystemApp {
                    url: "maps://?q=probe",
                    note: "地图"),
 
+            // ---- Safari 自己的入口 ----
+            Target(label: "safari.web-search",
+                   url: "x-web-search://?probe",
+                   note: "Safari 的搜索入口。历史上被用来免交互唤起搜索"),
+            Target(label: "safari.x-https",
+                   url: "x-safari-https://example.com",
+                   note: "私有写法，部分系统组件用它唤起 Safari。和 control.https 对比就知道它是不是等价物"),
+
             // ---- 历史上真正出过事的两个入口 ----
             Target(label: "safari.file",
                    url: "file:///private/etc/passwd",
@@ -126,18 +134,23 @@ enum ProbeSystemApp {
     /// `canOpenURL` 对未声明的 scheme 一律 false，且会往控制台打一条警告。
     /// 这条读数的意义**只在于和 `open` 的结果对比**，单独看没有信息量。
     @MainActor
-    static func canOpenMatrix() -> [String] {
+    static func canOpenLines() -> (lines: [String], yes: Int) {
         var out: [String] = []
+        var yes = 0
         for t in targets() {
             guard let u = URL(string: t.url) else {
                 out.append("\(t.label) :: url=invalid <\(t.url)>")
                 continue
             }
             let ok = UIApplication.shared.canOpenURL(u)
+            if ok { yes += 1 }
             out.append("\(t.label) :: canOpen=\(ok)")
         }
-        return out
+        return (out, yes)
     }
+
+    @MainActor
+    static func canOpenMatrix() -> [String] { canOpenLines().lines }
 
     // MARK: - 真交出去
 
@@ -186,6 +199,45 @@ enum ProbeSystemApp {
         }
         out.append("summary :: accepted=\(accepted)/\(targets().count)")
         return out
+    }
+
+    // MARK: - App 内一键跑完整矩阵
+
+    /// 存在的理由和 P12 那个工具栏按钮一样：21 个 scheme 来回改快捷指令参数太慢。
+    ///
+    /// 两个副作用必须处理，否则跑出来的表是假的：
+    ///
+    ///  1. **每 open 一次，本进程就被切到后台。** 第一行是前台发起，之后都是后台发起。
+    ///     这不是缺陷——`before=` 字段自己会写清楚每一行是从什么状态发起的，
+    ///     等于一次拿到两种条件。想单独要前台基线，就每次只跑一个目标。
+    ///  2. **后台大约 30 秒后会被挂起**，21 个目标跑不完。用 background task 要一段
+    ///     额外时间，并把轮询压到 3 拍（300ms）：切走的第一步是 inactive，
+    ///     300ms 足够，再多只是白等。
+    @MainActor
+    static func runAll(origin: String, pollTicks: Int = 3) async -> String {
+        var bg: UIBackgroundTaskIdentifier = .invalid
+        bg = UIApplication.shared.beginBackgroundTask(withName: "probe.sysapp", expirationHandler: { })
+        defer {
+            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
+        }
+
+        ProbeLog.recordContext("sysapp.ctx")
+        ProbeLog.record("sysapp.origin", "origin=\(origin) targets=\(targets().count)")
+
+        let can = canOpenLines()
+        for line in can.lines { ProbeLog.record("sysapp.canopen", line) }
+
+        var accepted = 0
+        for t in targets() {
+            let (line, ok) = await openOne(t, pollTicks: pollTicks)
+            if ok { accepted += 1 }
+            ProbeLog.record("sysapp.open", line)
+        }
+
+        let n = targets().count
+        let summary = "origin=\(origin) canopen_true=\(can.yes)/\(n) open_accepted=\(accepted)/\(n)"
+        ProbeLog.record("sysapp.summary", summary)
+        return summary
     }
 }
 

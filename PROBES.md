@@ -1081,3 +1081,201 @@ exec.jump :: about-to-jump
 
 `canOpenMatrix` 顺手拆成 `canOpenLines() -> (lines, yes)`，
 矩阵和计数共用一份实现，避免"表里数着 6 个 true、summary 写 5"这种漂移。
+
+---
+
+## v10 跑完了：一半结论当场作废
+
+### 原始读数
+
+```
+sysapp.summary :: origin=foreground canopen_true=17/21 open_accepted=3/21
+```
+
+`control.bogus` → `canOpen=false` / `open=refused`，`control.https` → `canOpen=true` / `open=accepted`。
+两道闸门都过了，表本身是有效的。**无效的是 `open_accepted=3/21` 这个数字。**
+
+### 为什么 3/21 不能读
+
+把 21 行按 `before=` 分组，相关性是**完美**的：
+
+| `before=` | 行数 | `open=accepted` |
+|---|---|---|
+| `active` | 3（control.https / tel / itms-services） | **3** |
+| `inactive` 或 `background` | 18 | **0** |
+
+零例外。也就是说 `open_accepted` 测的不是"这个 scheme 通不通"，
+而是"我发这一枪的时候在不在前台"。
+
+机制很硬：
+
+```
+第一个 open 成功 → 本进程被切到后台 → 之后每一次 open 都从后台发起
+                → iOS 对后台发起的 open 一律拒绝（refused / no-callback）
+```
+
+v10 的设计是"一次循环发 21 个"，所以第一个之后全部塌掉。
+这不是 iOS 的缺陷，是我把实验做成了单次可用。
+
+**判读规则（从这轮起硬性生效）**：`before != active` 的行，
+`open=` 字段一律作废，不管它写的是 `refused` 还是 `accepted`。
+
+### 这轮真正有效的读数
+
+**1. `canOpen` 那一列 21 行全部有效。** `canOpenURL` 是同步、无副作用、
+不改变进程状态的，整批在 `00:37:54` 一瞬间跑完，全在 active 下。
+
+| 结果 | 数量 | 目标 |
+|---|---|---|
+| `true` | 17 | https、4 个 shortcuts、2 个 prefs、files/photos/music、tel/sms/mailto/maps、**x-web-search**、**x-safari-https**、itms-services |
+| `false` | 4 | `control.bogus`、`prefs.legacy`、`safari.file`、`safari.data` |
+
+四个 false 全是**应该** false 的：bogus 没 handler、`prefs:` 老写法早废、
+`file:` 和 `data:` 在 iOS 9 之后封死。说明这张表在挑，不是一律返回 true。
+
+**2. 这里有个和文档冲突的读数。**
+
+`project.yml` 的 `LSApplicationQueriesSchemes` 只声明了 11 个：
+`shortcuts / prefs / App-prefs / shareddocuments / photos-redirect / music / tel / sms / mailto / maps / itms-services`。
+
+`x-web-search` 和 `x-safari-https` **不在里面**，`canOpenURL` 却返回 `true`。
+而同一张表里 `control.bogus`（同样未声明、且没有 handler）返回 `false`。
+
+两个可能，v10 的数据分不开：
+
+- (a) 声明门槛只约束"没有系统 handler 的 scheme"，Safari 的私有 scheme 走系统 App 的通道，绕过去了
+- (b) 打包出来的 Info.plist 跟 project.yml 不一致（比如 xcodegen 合并了别处的配置）
+
+v11 在运行时把 `Bundle.main` 里的 `LSApplicationQueriesSchemes` 原样 dump 出来（`sysapp.decl`），
+并加了 `x-safari-http` 作为同族第二个样本。**(a) 成立的话，整个 `x-safari-*` 族都该是 true。**
+
+**3. `itms-services` 是 `accepted ≠ worked` 的实物标本。**
+
+`open=accepted`，然后屏幕上弹了「无法连接 127.0.0.1」——iOS 收下了，
+去拉 manifest，拉不到。这正好把"收下了"和"做成了"这两种状态钉在一起给人看。
+
+### 截图和日志打架，这一条必须说清
+
+日志：`safari.x-https :: open=refused`。
+屏幕：Safari 停在 `example.com`，状态栏左上角写着 `◀ IntentProbe`。
+
+看着像"handler 说谎"，但**更可能是另一回事**：
+
+`control.https` 的 URL 就是 `https://example.com`，而且它是**第一个**发的（`00:37:54`，
+`open=accepted`，`after=inactive`）。之后 18 行的 `before=` 全是 inactive/background，
+说明 Safari 从那以后一直在前台。所以屏幕上那个页面，大概率是 `control.https` 开的，
+跟 `x-safari-https` 没关系。
+
+v10 分不开这两者，因为两个目标的 URL 打的是同一个域名、屏幕上长得一模一样。
+这是我的设计漏洞，不是数据的问题。
+
+**v11 的修法**：每个目标的 URL 都带自己的名字（`?probe=<label>`）。
+以后任何一张截图都能自证是哪个目标开的，这种歧义不会再出现。
+
+## v11 改了什么：把"一次激活一个"做成机制
+
+| 改动 | 为什么 |
+|---|---|
+| 串行执行器 `SysAppRunner` | 一次激活只发一个目标，发完就被切走，用户点回来发下一个。每个目标都在 `before=active` 下发出 |
+| cursor 存 UserDefaults | 进程会被挂起甚至回收，内存里的进度丢了就得从头点 22 次 |
+| `before != active` 不消费 cursor | 记一条 `sysapp.invalid` 就返回，绝不拿后台读数充数 |
+| 主判据换成 `didEnterBackground` 时间戳 | 发出后 3 秒内被切走 = 系统真接了，跟 handler 说什么无关 |
+| `sysapp.fire` 先落盘再调 `open` | 进程可能立刻被挂起，回调等不到，但"确实在 active 下发出去了"这个事实必须留下 |
+| URL 带 `?probe=<label>` | 截图自证身份，见上一节 |
+| `sysapp.decl` dump 真实声明列表 | 解掉"未声明却 canOpen=true"的歧义 |
+| 重点组 6 个 / 全量 22 个 | 22 次点击没人会做完；6 次是能做完的 |
+
+> `runAll(origin:)` 和工具栏纸飞机**已删除**。它产出的 `open_accepted` 是
+> 一个被前后台状态污染的指标，留着只会有人再去读它。
+> 现在唯一的批量入口是 intent 的 `mode=open`，而且注释里写明了"别用它出结论"。
+
+重点组就 6 个，都是"不跑完这一轮就没法往下走"的：
+
+```
+control.https      control.bogus      safari.x-https
+safari.x-http      safari.web-search  shortcuts.run
+```
+
+### 这一轮的判读顺序（按这个顺序读，别跳）
+
+```
+1. sysapp.decl 里有没有 x-safari-https
+      有 → 我记错了自己声明什么，v10 的"冲突"不存在，收工
+      没有 → (a) 成立：系统 App 的 handler 绕过声明门槛，这是个真结论
+
+2. control.bogus 的 left 必须是 no、open 必须是 refused
+      不是 → 整轮作废
+
+3. control.https 的 left 必须是 yes
+      不是 → 探针坏了，不是 iOS 的问题
+
+4. safari.x-https / x-safari.x-http 的 left
+      yes → 未声明的私有 scheme 能把 Safari 拉起来，且不需要用户确认
+
+5. safari.web-search 的 left
+      yes → 免交互唤起 Safari 搜索
+
+6. shortcuts.run 的 left
+      yes → 第三方 App 能按名字触发用户已有的快捷指令（不需要 Shortcuts 在前台）
+```
+
+`left=yes` 但 `open=refused` 的组合是**最值得注意**的一种：它说明
+completion handler 在后台路径上会假阴性，任何用它当判据的代码都会漏报。
+
+---
+
+## 自定义 URL：直接看"没有提示就进 Safari"
+
+串行队列是固定表，验证不了"我随便打个站会怎样"。所以加了一条手动通路：
+输入框 + 前缀下拉，想打哪个打哪个，不用改代码重装。
+
+### 判据：`verdict` 三档
+
+真正回答"有没有弹确认框"的不是屏幕上有没有看到框——是**本进程落到了哪个状态**。
+
+| `verdict` | `after=` | 含义 | 屏幕上 |
+|---|---|---|---|
+| `switched` | `background` | 真的被切走了 | Safari 直接起来，**没有确认框** |
+| `possibly-prompted` | `inactive` | 被盖住但没切走 | 多半压着一个系统确认框在等用户点 |
+| `inert` | `active` | 什么都没变 | URL 收下了，但没有任何反应 |
+
+中间那一档是这轮补的。iOS 的"要在 XX 中打开吗？"是 SpringBoard 的 alert，
+它只让前台 App 变成 `inactive`，**不会**让它进 `background`。
+所以 `inactive` 这个落点本身就是"弹了框"的指纹——之前的实现只有两档，把它和
+"什么都没发生"混在一起了。
+
+### 怎么用这一次实验把两个 scheme 分开
+
+只改前缀，不改域名，各打一次：
+
+```
+输入：example.com/?probe=A    前缀：https            → verdict=?
+输入：example.com/?probe=B    前缀：x-safari-https   → verdict=?
+```
+
+| 组合 | 结论 |
+|---|---|
+| 两个都 `switched` | 私有 scheme 没有额外权限，`https` 本来就能免交互进浏览器 |
+| `https` 的 `after` 不是 Safari（被默认浏览器接走）、`x-safari-https` 硬进 Safari | **这才是这两者真正的差别**：私有写法能绕过"默认浏览器"这个用户选择 |
+| `x-safari-https` 是 `possibly-prompted` | 有确认框，免交互不成立 |
+| `x-safari-https` 是 `inert` | URL 收下了但 Safari 没动，v10 那个 `open=refused` 就是这种情况 |
+
+**唯一能区分第一种和第二种的办法**：看屏幕上开的是不是 Safari。
+如果设备把默认浏览器改成了 Chrome / Edge，`https` 会进那个，`x-safari-https` 仍然进 Safari。
+这也是为什么每个 URL 都带 `?probe=<label>`——截图自证身份。
+
+### 输入框的行为
+
+- 输入里已经带 `://` 的先剥掉再拼前缀，所以 `example.com/a` 和 `https://example.com/a`
+  选同一个前缀得到同一个 URL。不这么做的话，两个看起来一样的输入打出两种结果，没法比。
+- 选 `原样` 就完全不拼，用来打完整 URL（比如 `data:`、`file:`、`itms-services:`）。
+- 选 `x-web-search` 时输入被当成**搜索词**，拼成 `x-web-search://?<词>`。
+- 每次打完，界面上直接回显 `verdict · left · open · url`，不用滚到日志底部。
+
+### 两条容易读错的
+
+1. **`open=refused` 但 `verdict=switched`**：completion handler 假阴性，
+   URL 其实投递了。以 `verdict` 为准，`open=` 只当辅助。
+2. **`open=accepted` 但 `verdict=inert`**：URL 收下了，什么都没发生。
+   v10 的 `itms-services` 就是这一种（然后弹了个连不上 127.0.0.1 的框）。
+   `accepted` 只证明"有人接单"，不证明"送到了"。

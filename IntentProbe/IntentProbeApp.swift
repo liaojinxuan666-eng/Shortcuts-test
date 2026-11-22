@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @main
 struct IntentProbeApp: App {
@@ -11,17 +14,32 @@ struct IntentProbeApp: App {
 
 struct ContentView: View {
     @State private var log: String = ""
+    /// 串行执行器的进度要靠它刷新：UserDefaults 不是 @Published，改了自己不会触发重绘。
+    @State private var tick: Int = 0
 
-    private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    /// 自定义 URL：想打哪个站点就打哪个，不用改代码重装。
+    @State private var customURL: String = "example.com/?probe=custom"
+    @State private var customPrefix: String = "x-safari-https"
+    @State private var lastCustom: String = "-"
+
+    @Environment(\.scenePhase) private var scenePhase
+
+    private let refreshTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                Text(log.isEmpty ? "(空)\n\n让一个快捷指令调用本 App 的 intent，这里会出现记录。" : log)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .textSelection(.enabled)
+            VStack(spacing: 0) {
+                sysAppBar
+                Divider()
+                customBar
+                Divider()
+                ScrollView {
+                    Text(log.isEmpty ? "(空)\n\n让一个快捷指令调用本 App 的 intent，这里会出现记录。" : log)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .textSelection(.enabled)
+                }
             }
             .navigationTitle("Probe Log · \(ProbeLog.buildTag)")
             .toolbar {
@@ -50,22 +68,6 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    // 一键把 21 个 URL 交给系统 App。这是唯一能真正触发
-                    // ProbeSystemApp 的入口——它没注册进 AppShortcutsProvider
-                    // （上限 10 个，画廊满了），从快捷指令里搜得到但很难找。
-                    //
-                    // 注意：每 open 一次本进程就被切走，所以第一行是前台发起、
-                    // 后面都是后台发起。`before=` 字段会自己写清楚。
-                    Button {
-                        Task {
-                            _ = await ProbeSystemApp.runAll(origin: "foreground")
-                            reload()
-                        }
-                    } label: {
-                        Image(systemName: "paperplane")
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
                     ShareLink(item: ProbeLog.url) {
                         Image(systemName: "square.and.arrow.up")
                     }
@@ -78,12 +80,173 @@ struct ContentView: View {
                     }
                 }
             }
-            .onAppear { reload() }
+            .onAppear {
+                SysAppRunner.install()
+                reload()
+            }
             .onReceive(refreshTimer) { _ in reload() }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task {
+                    // 顺序不能反：先补上"上一个目标有没有把系统叫起来"，
+                    // 再发下一个。反了的话 noteReturn 会读到下一轮的 lastFire。
+                    SysAppRunner.noteReturn()
+                    await SysAppRunner.fireNext(trigger: "became-active")
+                    reload()
+                }
+            }
         }
+    }
+
+    /// 自定义 URL：验证"没有提示就直接进 Safari"这件事。
+    ///
+    /// 判据不在屏幕上，在日志的 `verdict=` 字段：
+    ///
+    /// ```
+    /// verdict=switched           真的切走了 → Safari 直接起来，没有确认框
+    /// verdict=possibly-prompted  停在 inactive → 多半压着一个系统确认框
+    /// verdict=inert              什么都没发生 → URL 收下了但没反应
+    /// ```
+    ///
+    /// 只改前缀、不改域名，跑两次就能把 `https` 和 `x-safari-https` 分开：
+    /// 如果两个都 `switched`，说明私有 scheme 没有额外权限；
+    /// 如果 `https` 被系统换成了默认浏览器而 `x-safari-https` 硬进 Safari，
+    /// 那才是这两者真正的差别。
+    private var customBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TextField("example.com 或完整 URL", text: $customURL)
+                    .font(.system(size: 12, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.go)
+                    .onSubmit { fireCustom() }
+            }
+
+            HStack(spacing: 6) {
+                Picker("", selection: $customPrefix) {
+                    ForEach(ProbeSystemApp.prefixes) { p in
+                        Text(p.title).tag(p.key)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .font(.system(size: 11))
+
+                Spacer()
+
+                Button {
+                    fireCustom()
+                } label: {
+                    Label("打开", systemImage: "safari")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            Text("上次：\(lastCustom)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private func fireCustom() {
+        let raw = customURL
+        let prefix = customPrefix
+        Task {
+            await SysAppRunner.fireCustom(raw: raw, prefix: prefix)
+            reload()
+        }
+    }
+
+    /// 串行执行器的小控制条。
+    ///
+    /// 为什么不放工具栏：iPhone 上 5 个图标已经挤满了，再加就折叠进溢出菜单，
+    /// 而这一组恰恰是"必须看到进度、必须知道下一步该干什么"的那种。
+    private var sysAppBar: some View {
+        let armed = SysAppRunner.armed
+        let cur = SysAppRunner.cursor
+        let total = SysAppRunner.queue.count
+        let done = cur >= total && total > 0
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "paperplane")
+                    .font(.caption)
+                Text(done ? "已完成 \(total)/\(total)" : (armed ? "串行 \(cur)/\(total)" : "串行 · 未开始"))
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                Spacer()
+                if armed && !done {
+                    Button("停") {
+                        SysAppRunner.stop()
+                        reload()
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                }
+                Button(done ? "再来一轮" : (armed ? "继续" : "开始")) {
+                    Task {
+                        if !armed || done {
+                            SysAppRunner.reset(to: "priority")
+                            await SysAppRunner.fireNext(trigger: "bar-start")
+                        } else {
+                            await SysAppRunner.fireNext(trigger: "bar-tap")
+                        }
+                        reload()
+                    }
+                }
+                .font(.caption)
+                .buttonStyle(.borderedProminent)
+            }
+
+            if armed && !done {
+                Text("下一个：\(SysAppRunner.queue[min(cur, total - 1)].label) · 发完会切走，点回本 App 继续")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            } else if !armed {
+                Text("6 个重点目标，一次发一个。每次都在前台发起，读数才有效。")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button("全量 22 个") {
+                    Task {
+                        SysAppRunner.reset(to: "all")
+                        await SysAppRunner.fireNext(trigger: "bar-all")
+                        reload()
+                    }
+                }
+                .font(.system(size: 10))
+                .buttonStyle(.bordered)
+
+                Button("只看 canOpen") {
+                    Task {
+                        for line in await ProbeSystemApp.canOpenMatrix() {
+                            ProbeLog.record("sysapp.canopen", line)
+                        }
+                        ProbeLog.record("sysapp.decl",
+                                        "declared=\(ProbeSystemApp.declaredSchemes().joined(separator: ","))")
+                        reload()
+                    }
+                }
+                .font(.system(size: 10))
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.thinMaterial)
     }
 
     private func reload() {
         log = (try? String(contentsOf: ProbeLog.url, encoding: .utf8)) ?? ""
+        lastCustom = SysAppRunner.lastCustom
+        tick &+= 1
     }
 }

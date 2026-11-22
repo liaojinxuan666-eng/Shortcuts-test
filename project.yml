@@ -44,6 +44,12 @@ targets:
         # 所以这张表是 P13 的前置条件，不声明的话 canOpen 那一列全是 false，
         # 读出来毫无信息量。上限 50 个，这里只声明要测的。
         # 注意：open() 不需要声明也能用，这个不对称本身就是 P13 要量的东西。
+        #
+        # 故意**不**声明 x-web-search / x-safari-https / x-safari-http。
+        # v10 里这两个未声明的 Safari 私有 scheme 拿到了 canOpen=true，
+        # 而同表里同样未声明、且没有 handler 的 control.bogus 是 false。
+        # 声明了它们，这个差值就永远量不到了——那是这一组最值钱的一条线索。
+        # 运行时 `sysapp.decl` 会把 Bundle.main 里真实的列表打出来，防止打包漂移。
         LSApplicationQueriesSchemes:
           - shortcuts
           - prefs

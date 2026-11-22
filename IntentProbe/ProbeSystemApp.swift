@@ -245,22 +245,33 @@ enum ProbeSystemApp {
 
 // MARK: - 串行执行器
 
+/// UserDefaults 的键。
+///
+/// **故意放在 `@MainActor` 类型外面。** 键只是字符串常量，但一旦写进
+/// `@MainActor` 的 enum 里就变成 main-actor-isolated，而
+/// `didEnterBackground` 的观察闭包是 `@Sendable` 的——Xcode 16.4 会直接报
+/// "main actor-isolated static property 'kBgAt' can not be referenced from
+/// a Sendable closure"。现在只是警告，Swift 6 语言模式下是错误。
+/// 挪出来就没有这个问题，也不需要 `nonisolated(unsafe)` 这种掩耳盗铃的写法。
+private enum SysAppKeys {
+    static let cursor = "sysapp.cursor"
+    static let run = "sysapp.run"
+    static let armed = "sysapp.armed"
+    static let lastFire = "sysapp.lastfire"
+    static let bgAt = "sysapp.bgat"
+    static let mode = "sysapp.mode"        // "priority" | "all"
+}
+
 /// 一次激活只发一个目标。
 ///
 /// 状态全放 UserDefaults：进程会被挂起、可能被系统回收，
 /// 内存里的 cursor 丢了就得从头再来一遍 22 次点击。
 @MainActor
 enum SysAppRunner {
-    private static let kCursor = "sysapp.cursor"
-    private static let kRun = "sysapp.run"
-    private static let kArmed = "sysapp.armed"
-    private static let kLastFire = "sysapp.lastfire"
-    private static let kBgAt = "sysapp.bgat"
-    private static let kMode = "sysapp.mode"      // "priority" | "all"
 
     static var mode: String {
-        get { UserDefaults.standard.string(forKey: kMode) ?? "priority" }
-        set { UserDefaults.standard.set(newValue, forKey: kMode) }
+        get { UserDefaults.standard.string(forKey: SysAppKeys.mode) ?? "priority" }
+        set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.mode) }
     }
 
     static var queue: [ProbeSystemApp.Target] {
@@ -268,24 +279,24 @@ enum SysAppRunner {
     }
 
     static var cursor: Int {
-        get { UserDefaults.standard.integer(forKey: kCursor) }
-        set { UserDefaults.standard.set(newValue, forKey: kCursor) }
+        get { UserDefaults.standard.integer(forKey: SysAppKeys.cursor) }
+        set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.cursor) }
     }
     static var runId: String {
-        get { UserDefaults.standard.string(forKey: kRun) ?? "-" }
-        set { UserDefaults.standard.set(newValue, forKey: kRun) }
+        get { UserDefaults.standard.string(forKey: SysAppKeys.run) ?? "-" }
+        set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.run) }
     }
     static var armed: Bool {
-        get { UserDefaults.standard.bool(forKey: kArmed) }
-        set { UserDefaults.standard.set(newValue, forKey: kArmed) }
+        get { UserDefaults.standard.bool(forKey: SysAppKeys.armed) }
+        set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.armed) }
     }
     static var lastFire: Date? {
-        get { UserDefaults.standard.object(forKey: kLastFire) as? Date }
-        set { UserDefaults.standard.set(newValue, forKey: kLastFire) }
+        get { UserDefaults.standard.object(forKey: SysAppKeys.lastFire) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.lastFire) }
     }
     static var bgAt: Date? {
-        get { UserDefaults.standard.object(forKey: kBgAt) as? Date }
-        set { UserDefaults.standard.set(newValue, forKey: kBgAt) }
+        get { UserDefaults.standard.object(forKey: SysAppKeys.bgAt) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: SysAppKeys.bgAt) }
     }
 
     static var progress: String {
@@ -300,17 +311,17 @@ enum SysAppRunner {
     static func install() {
         guard !installed else { return }
         installed = true
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
         ) { _ in
             let now = Date()
-            UserDefaults.standard.set(now, forKey: kBgAt)
+            UserDefaults.standard.set(now, forKey: SysAppKeys.bgAt)
             Task { @MainActor in flushPending(left: .background, bgAt: now) }
         }
     }
 
-    static func reset(to mode newMode: String) {
+    static func reset(to newMode: String) {
         mode = newMode
         cursor = 0
         armed = true

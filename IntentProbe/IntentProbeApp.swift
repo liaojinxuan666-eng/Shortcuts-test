@@ -47,7 +47,7 @@ struct ContentView: View {
                     // 直接在 App 里跑一遍环境扫描。省掉"改快捷指令 → 跑 → 看日志"的往返，
                     // 结果和从 Shortcuts 触发完全一致：同一个进程、同一个沙箱。
                     Button {
-                        Task {
+                        Task { @MainActor in
                             _ = try? await ProbeSweepIntent().perform()
                             reload()
                         }
@@ -59,7 +59,7 @@ struct ContentView: View {
                     // 一键扫"哪些目录我能写"。和走快捷指令完全等价（同进程同沙箱），
                     // 但省掉改快捷指令的往返——矩阵有 19 个目录，来回改参数太慢。
                     Button {
-                        Task {
+                        Task { @MainActor in
                             _ = try? await ProbeCreateFileIntent(matrix: true).perform()
                             reload()
                         }
@@ -87,7 +87,7 @@ struct ContentView: View {
             .onReceive(refreshTimer) { _ in reload() }
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active else { return }
-                Task {
+                Task { @MainActor in
                     // 顺序不能反：先补上"上一个目标有没有把系统叫起来"，
                     // 再发下一个。反了的话 noteReturn 会读到下一轮的 lastFire。
                     SysAppRunner.noteReturn()
@@ -158,7 +158,7 @@ struct ContentView: View {
     private func fireCustom() {
         let raw = customURL
         let prefix = customPrefix
-        Task {
+        Task { @MainActor in
             await SysAppRunner.fireCustom(raw: raw, prefix: prefix)
             reload()
         }
@@ -190,7 +190,7 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                 }
                 Button(done ? "再来一轮" : (armed ? "继续" : "开始")) {
-                    Task {
+                    Task { @MainActor in
                         if !armed || done {
                             SysAppRunner.reset(to: "priority")
                             await SysAppRunner.fireNext(trigger: "bar-start")
@@ -216,7 +216,7 @@ struct ContentView: View {
 
             HStack(spacing: 8) {
                 Button("全量 22 个") {
-                    Task {
+                    Task { @MainActor in
                         SysAppRunner.reset(to: "all")
                         await SysAppRunner.fireNext(trigger: "bar-all")
                         reload()
@@ -226,7 +226,7 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
 
                 Button("只看 canOpen") {
-                    Task {
+                    Task { @MainActor in
                         for line in await ProbeSystemApp.canOpenMatrix() {
                             ProbeLog.record("sysapp.canopen", line)
                         }

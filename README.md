@@ -69,6 +69,22 @@ base64 -i profile.mobileprovision -o profile.b64
 
 ---
 
+## 先看环境，再看结论
+
+每条 `*.ctx` 都带 `env=` 字段：
+
+```
+sweep.ctx :: build=v9-env env=clean bundle=com.probe.intentprobe ...
+sweep.ctx :: build=v9-env env=jailbroken(systemhook.dylib) bundle=...
+```
+
+`env=jailbroken(...)` 时，**代码执行类的结果一律不能当成 iOS 的行为**——
+v6（`injected=none`）和 v8（`injected=systemhook`）是同一份 exec 代码、
+同一台设备，结果一个是 SIGKILL、一个是正常返回，唯一变量就是这一行。
+
+判据两条，分开失效所以都留着：dyld 镜像表里的非 Apple 镜像；
+`/usr/lib/systemhook.dylib` 或 `/var/jb/usr/lib/systemhook.dylib` 是否存在。
+
 ## 探针列表（16 个 intent，画廊里只放 10 个）
 
 `AppShortcutsProvider` 每个 App 上限 10 个，所以画廊里只有前 10 个；
@@ -161,6 +177,7 @@ xcodebuild -project IntentProbe.xcodeproj -scheme IntentProbe \
 │   ├── ProbeIntentsFS.swift      5 个沙箱 intent（扫描/路径/加载/文件深挖/代码执行）
 │   ├── ProbeFileCreate.swift     创建文件 + 可写目录矩阵（v7）
 │   ├── ProbeSystemApp.swift      URL scheme 交接矩阵 + 系统执行（v8）
+│   ├── ProbeEnv.swift            越狱环境判据：dyld 注入 + bootstrap 落盘（v9）
 │   ├── ProbeEntity.swift         AppEntity + 三个查询入口
 │   ├── ProbeSnippet.swift        伪装弹窗 + 对话框两条 UI 通道
 │   ├── ProbeShortcuts.swift      AppShortcutsProvider（画廊磁贴，上限 10 个）

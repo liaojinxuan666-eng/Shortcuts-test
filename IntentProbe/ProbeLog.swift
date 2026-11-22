@@ -30,7 +30,7 @@ enum ProbeLog {
 
     /// **每次改代码就改这个字符串。** 日志里带着它，才能确定设备上跑的是哪一版——
     /// 否则"新探针没输出"会被误读成"探针失败"，实际是旧二进制没被执行到。
-    static let buildTag = "v8-handoff"
+    static let buildTag = "v9-env"
 
     /// 记录"我是谁、在什么状态下被调用"——判断是前台还是后台触发，决定了
     /// 实验 7（自动化零点击）能不能成立。
@@ -41,7 +41,10 @@ enum ProbeLog {
         let b = Bundle.main
         let bid = b.bundleIdentifier ?? "?"
         let pid = ProcessInfo.processInfo.processIdentifier
-        record(kind, "build=\(buildTag) bundle=\(bid) pid=\(pid) container=\(containerUUID) appState=\(appState)")
+        // env 必须在这条线上：它是唯一能区分"iOS 的行为"和"越狱给的行为"的字段。
+        // v6/v7 的 injected=none 和 v8 的 injected=systemhook，是同一台设备、
+        // 同一份 exec 代码得到相反结果的全部原因。
+        record(kind, "build=\(buildTag) env=\(ProbeEnv.label) bundle=\(bid) pid=\(pid) container=\(containerUUID) appState=\(appState)")
     }
 
     static var containerUUID: String {

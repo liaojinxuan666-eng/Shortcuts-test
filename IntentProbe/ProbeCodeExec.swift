@@ -347,6 +347,8 @@ enum ProbeCodeExec {
 
         let flushed = flushICache(page, len)
         ProbeLog.record("exec.jump", "icache_flush=\(flushed) ptr=\(page) opcode=ret")
+        // 判词先落盘：跳进去之后进程可能立刻没了，这一行是唯一能给结果归属的东西。
+        ProbeLog.record("exec.env", ProbeEnv.verdict)
         ProbeLog.record("exec.jump", "about-to-jump")
         ProbeLog.record("exec.jump", "SIGBUS=page-table NX; SIGKILL+codesign=AMFI")
 
@@ -354,9 +356,16 @@ enum ProbeCodeExec {
         let f = unsafeBitCast(page, to: Fn.self)
         f()
 
-        ProbeLog.record("exec.jump", "RETURNED NORMALLY —— 匿名可执行内存真的可用")
+        // 这一行是整份探针里最容易被误读的一句。
+        // 同一个返回值，在干净设备上意味着"墙不存在"，在越狱设备上意味着
+        // "systemhook 把墙拆了"。所以判词由 ProbeEnv 决定，不由这行代码决定。
+        if ProbeEnv.isJailbroken {
+            ProbeLog.record("exec.jump", "RETURNED NORMALLY —— 但 \(ProbeEnv.label)，不构成 finding")
+        } else {
+            ProbeLog.record("exec.jump", "RETURNED NORMALLY —— env=clean，匿名可执行内存真的可用")
+        }
         munmap(page, len)
-        return "jump=ok(returned) mprotect=\(mprStr) icache_flush=\(flushed)"
+        return "jump=ok(returned) mprotect=\(mprStr) icache_flush=\(flushed) env=\(ProbeEnv.label)"
     }
 
     // MARK: - 汇总

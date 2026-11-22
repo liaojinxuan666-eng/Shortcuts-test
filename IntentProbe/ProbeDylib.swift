@@ -113,14 +113,12 @@ enum ProbeDylib {
         return unsafeBitCast(s, to: ImageNameFn.self)
     }()
 
-    static func loadedImages() -> String {
-        guard let count = imageCount, let nameAt = imageName else {
-            return "unavailable(dlsym _dyld_image_count)"
-        }
-
-        let n = count()
+    /// 只把可疑镜像挑出来，不带格式。`ProbeEnv` 用它做越狱判据，
+    /// `loadedImages()` 用它做日志行——判据只写一份，两边不会漂。
+    static func suspiciousImages() -> [String] {
+        guard let count = imageCount, let nameAt = imageName else { return [] }
         var sus: [String] = []
-        for i in 0..<n {
+        for i in 0..<count() {
             guard let c = nameAt(i) else { continue }
             let p = String(cString: c)
             let low = p.lowercased()
@@ -130,8 +128,16 @@ enum ProbeDylib {
                 sus.append(p)
             }
         }
+        return sus
+    }
+
+    static func loadedImages() -> String {
+        guard let count = imageCount, imageName != nil else {
+            return "unavailable(dlsym _dyld_image_count)"
+        }
+        let sus = suspiciousImages()
         let list = sus.isEmpty ? "none" : sus.joined(separator: ",")
-        return "count=\(n) injected=\(list)"
+        return "count=\(count()) injected=\(list)"
     }
 
     // MARK: - 这个路径是不是已经在进程里了

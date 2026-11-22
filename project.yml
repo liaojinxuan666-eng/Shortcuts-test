@@ -40,6 +40,22 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # canOpenURL 对**未声明**的 scheme 一律返回 false——哪怕目标 App 装着。
+        # 所以这张表是 P13 的前置条件，不声明的话 canOpen 那一列全是 false，
+        # 读出来毫无信息量。上限 50 个，这里只声明要测的。
+        # 注意：open() 不需要声明也能用，这个不对称本身就是 P13 要量的东西。
+        LSApplicationQueriesSchemes:
+          - shortcuts
+          - prefs
+          - App-prefs
+          - shareddocuments
+          - photos-redirect
+          - music
+          - tel
+          - sms
+          - mailto
+          - maps
+          - itms-services
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.probe.intentprobe

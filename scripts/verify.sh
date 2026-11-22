@@ -7,7 +7,7 @@ fail=0
 
 # 源文件总数。改这里一处，下面三处检查跟着变——之前三处各写一个 10，
 # 加文件时漏改一个就会在 CI 里报"MISS 源文件不全"，排查半天。
-N=11
+N=12
 
 ok()   { printf '  %sOK%s    %-34s %s\n' "$GRN" "$RST" "$1" "${2:-}"; }
 miss() { printf '  %sMISS%s  %-34s %s\n' "$RED" "$RST" "$1" "${2:-}"; fail=1; }
@@ -29,7 +29,7 @@ echo
 
 # ------------------------------------------------------------------ 源文件
 echo "=== 源文件（$N 个，一个都不能少） ==="
-EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift ProbeCodeExec.swift ProbeFileCreate.swift"
+EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift ProbeCodeExec.swift ProbeFileCreate.swift ProbeSystemApp.swift"
 for f in $EXPECTED; do
   if [ -f "IntentProbe/$f" ]; then
     ok "IntentProbe/$f" "$(wc -c < "IntentProbe/$f" | tr -d ' ') bytes"

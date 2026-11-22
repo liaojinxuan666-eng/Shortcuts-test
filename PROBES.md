@@ -158,6 +158,59 @@ bundle 负对照 FAIL"——负对照 FAIL 才说明上面那些绿不是探针�
 上限 10 个，现在正好 10 个，再加一个会**构建失败**。`AppIntent` 不注册也能被
 快捷指令索引到，只是不在画廊里显示磁贴。App 内工具栏的文件夹按钮走的是同一条路径。
 
+---
+
+## 第四轮新增：交给系统 App
+
+### P13 · 交给系统 App（输入：模式 / URL）
+
+**问：我能不能让一个比我权限高的进程替我做这件事？**
+
+这一问和前面所有探针都不同：前面问"我能不能"，这里问"**能不能推给别人**"。
+后者才是 App Intents 这条边界上的主战场——28 个 Shortcuts CVE 里 0 个内存破坏，
+全是这类 confused deputy。
+
+三种交接机制，差别本身就是结论：
+
+| 机制 | 谁在执行 | 需要我在前台 |
+|---|---|---|
+| `canOpenURL` | 没人执行，只问策略 | 不需要 |
+| `UIApplication.open` | **我的进程**发起请求 | 大概率需要 |
+| 返回 `opensIntent: OpenURLIntent` | **系统**在 intent 返回后执行 | 不需要 |
+
+第三种不是私有 API，是 App Intents 官方给 intent 用的出口。它和第二种的差值，
+就是这一轮要量的东西。
+
+**输出**：
+
+```
+sysapp.mode  :: mode=<open>
+sysapp.open  :: control.https :: before=background after=background open=no-callback
+sysapp.open  :: control.bogus :: before=background after=background open=refused
+sysapp.open  :: shortcuts.run :: before=background after=background open=no-callback
+sysapp.summary :: accepted=2/19
+```
+
+**判读**（前一条不成立，后一条就不用看）：
+
+| 组合 | 含义 | 陷阱 |
+|---|---|---|
+| `control.bogus` 不是 refused | 整张表作废 | 负对照是唯一的防伪标记 |
+| `control.https` 不是 accepted | 探针本身坏了 | http/https 不需要声明，必须通 |
+| `canOpen=false` + `open=refused` | 没声明或没装 | 这是**默认状态**，不是发现 |
+| `canOpen=false` + `open=accepted` | 没声明，但 open 照样收下 | **真差值**：声明只约束 canOpenURL，不约束 open |
+| `open=accepted` + `after=background` | 系统真的接过去了 | 这才是"交接成功" |
+| `open=accepted` + `after=active` | URL 收下了，什么都没发生 | **最容易读成成功** |
+| `open=no-callback` | 回调没被调用，多半在后台 | 不是"失败"，是"没结论" |
+
+**这个探针的产出是线索，不是 finding。** 它只能量到"系统接不接"，
+量不到 Safari / Shortcuts 接到之后做了什么。要变成 finding，
+得在接收侧证明它没校验来源。
+
+**前置条件**：`LSApplicationQueriesSchemes` 里没声明的 scheme，`canOpenURL`
+一律返回 false——**哪怕目标 App 装着**。所以 false 不能读成"没装"。
+反过来，`open()` 不需要声明也能用，这个不对称本身就是 P13 的一条读数。
+
 ## 第一轮：输入边界（原有 5 个）
 
 | 探针 | 问题 | 已知结果 |
@@ -711,14 +764,99 @@ max prot 里抹掉了，`mprotect(RX)` 返回 0 只是把同一个谎重复一�
 **没做的事**：没注册进 `AppShortcutsProvider`。上限 10 个，现在正好 10 个，
 第 11 个会构建失败。`AppIntent` 不注册也能被快捷指令索引到，只是不在画廊里显示磁贴。
 
+## 结论十六：写面 = 6 个目录，全在自己容器内
+
+v7 实测（两次，App 重启过一次，结果一致）：
+
+```
+create.matrix :: tmp                                :: open=ok   ... exec=DENY
+create.matrix :: Documents                          :: open=ok   ... exec=DENY
+create.matrix :: Library                            :: open=ok   ... exec=DENY
+create.matrix :: Caches                             :: open=ok   ... exec=DENY
+create.matrix :: home                               :: open=EPERM          ← 容器根自己不可写
+create.matrix :: home/Library/Preferences           :: open=ok   ... exec=DENY
+create.matrix :: home/Library/Application Support   :: open=ok   ... exec=DENY
+create.matrix :: bundle(负对照)                     :: open=EPERM          ← 负对照按预期失败
+create.matrix :: summary :: writable=6/19
+```
+
+三条读数：
+
+1. **负对照 FAIL** → 上面的 `open=ok` 不是探针在骗自己。这张表这次可以信
+2. **`home` 是 EPERM** → iOS 的写授权是**按枚举子目录**给的，不是按整棵子树。
+   推论：Shortcuts 递给我一个文件时，给的是"这一个文件"的扩展权限，
+   不是"这个目录"。所以在它旁边埋东西大概率也是 EPERM
+3. **`/private/preboot/Cryptexes`（mode=777）→ EPERM** → 权限位在沙箱面前
+   根本轮不到被检查。这条候选正式关闭，以后不用再试
+
+我上一轮预测基线是 7/19（把 `home` 算进去了），实际 6/19。**预测错了一格，
+而且错在没量就断言。**
+
+## 结论十七：`/private/etc` 返回 ENOENT，`/usr/lib` 两次 errno 不一样
+
+```
+第一次: /private/etc :: open=ENOENT      /usr/lib :: open=EPERM
+第二次: /private/etc :: open=ENOENT      /usr/lib :: open=EROFS
+```
+
+`/private/etc/passwd` 在同一份日志里 `lstat=ok`、内容读得出来，目录明确存在。
+**创建文件时返回"目录不存在"不是正常的拒绝码。**
+
+两个可能，得用 `statfs` 才能分开：
+
+- 卷本身只读（SSV 快照）→ VFS 直接 `EROFS`，firmlink 目标在某些路径上 `ENOENT`
+- 沙箱先拒绝 → `EPERM`
+
+如果 `f_flags & MNT_RDONLY` 成立，这两个异常就都解释完了，而且**都不是发现**——
+系统卷只读是设计。定性只要 20 行：
+
+```
+statfs(dir) → f_flags & MNT_RDONLY     // 卷是不是只读
+open(已存在的文件, O_WRONLY)            // 不创建，只问写
+```
+
 ## 下一步该问的
 
-1. **`create.matrix` 的 `writable=N/19` 是多少** —— 自己的容器应该 7/19（tmp、
-   Documents、Library、Caches、home、Preferences、Application Support），
-   系统侧应该 0，bundle 负对照必须 FAIL。这三条不成立就是探针有问题，先修探针
-2. **`/private/preboot/Cryptexes` 能不能写** —— 唯一一个 777 目录。能写的话，
-   接着看那份 dylib 的 `dlopen` 结果
-3. **Shortcuts 递进来的文件落在哪** —— 把 `filedeep.parent` 填进 P12 的"目录"，
-   直接问"能不能在它旁边埋东西"。这是唯一还没被否掉的入口
-4. 用户数据侧（`/private/var/mobile`）已确认关闭、`sandbox_check` 已确认不可信，
-   这两条都不用再试
+1. **P13 的那个命题**：`opensIntent: OpenURLIntent` 交得出去、`UIApplication.open`
+   交不出去——同进程同沙箱，换个出口结果不同，这才叫不对称
+2. **`shortcuts.run` 这一行**：第三方 App 能不能按名字触发用户已有的快捷指令。
+   能，就是一条不需要任何越狱的"委派"原语
+3. **`statfs` 那 20 行**：把 ENOENT / EROFS / EPERM 收敛成一个事实
+4. 用户数据侧（`/private/var/mobile`）、`/private/preboot/Cryptexes`、
+   `sandbox_check` 当判据——这三条都已关闭，不用再试
+
+## v8 改了什么：把活交给系统 App
+
+代码执行那条线关掉之后，问题换了方向：不是"我能不能执行"，而是
+"我能不能让系统 App 替我执行"。这一层不需要任何越狱级 primitive，
+只要系统没校验来源，就是真问题。
+
+| 新增 | 为什么 |
+|---|---|
+| `ProbeSystemApp.targets()` | 19 个 scheme，正负对照排最前 |
+| `canOpenMatrix()` | 只问不做。单独看没有信息量，价值全在跟 `open` 对比 |
+| `openMatrix()` | 真交出去，同时记 `before/after` appState 与回调状态 |
+| `ProbeHandoffIntent` | 返回 `opensIntent: OpenURLIntent`，由**系统**执行 |
+| `LSApplicationQueriesSchemes` | 不声明，`canOpen` 那一列全是 false，整列作废 |
+
+**一个具体、可证伪的命题**：
+
+> 同一个 URL，走 `UIApplication.open` 交不出去（后台，或系统拒绝），
+> 但走 `opensIntent: OpenURLIntent` 能交出去。
+
+成立 → "intent 返回值"这条通道的权限比 App API 大：同一个进程、同一个沙箱，
+换个出口结果不同。不成立 → 这条也关掉，和 `mprotect` 一样记成"设计如此"。
+
+注意 `openAppWhenRun = false` 是有意的：从快捷指令触发时本进程在后台，
+而"后台的 App 能不能让系统打开 URL"正是要问的问题之一。想要前台基线，
+就在 App 里点一次、再从快捷指令跑一次，对比两份日志的 `before=`。
+
+**这一版只用了验证过的 API 形式。** `@Parameter(title:description:default:)`
+这个三参数组合从没被编译器验证过（v7 在 import 阶段就挂了，参数根本没轮到类型检查），
+所以全部退回 `@Parameter(title:default:)`——这个形式在 v6 里编过。
+说明挪进标题和 `///` 注释，代价是快捷指令里标签长一点，换掉一次可能的构建失败。
+
+还有一处没验证：`OpenURLIntent(url)` 和 `.result(opensIntent:)` 的具体签名。
+如果 CI 报 `cannot find 'OpenURLIntent' in scope` 或
+`extra argument 'opensIntent'`，就说明这版 SDK 上名字不同，
+把 `ProbeHandoffIntent` 退回 `UIApplication.open` 即可，其余不受影响。

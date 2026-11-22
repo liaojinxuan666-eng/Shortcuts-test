@@ -286,24 +286,28 @@ struct ProbeCreateFileIntent: AppIntent {
         IntentDescription("在指定目录创建文件并记录读数；可一键扫描所有候选目录。")
     static var openAppWhenRun: Bool = false
 
-    @Parameter(title: "目录",
-               description: "留空则用自己的 tmp。填 file.parent 的输出就能测「能不能在 Shortcuts 给我的文件旁边埋东西」",
-               default: "")
+    /// 留空则用自己的 `tmp/`。填 `ProbeFileDeepIntent` 打出来的 `filedeep.parent`，
+    /// 就能测「能不能在 Shortcuts 给我的那个文件旁边埋东西」。
+    @Parameter(title: "目录（留空=自己的 tmp）", default: "")
     var dir: String
 
-    @Parameter(title: "文件名", description: "留空则把「目录」整个当完整路径用", default: "probe-created.bin")
+    /// 留空则把「目录」那一栏整个当完整文件路径用。
+    @Parameter(title: "文件名（留空=目录即完整路径）", default: "probe-created.bin")
     var name: String
 
     @Parameter(title: "内容", default: "probe")
     var content: String
 
-    @Parameter(title: "拷贝源文件", description: "非空则用该文件的字节代替上面的内容", default: "")
+    /// 非空则用该文件的字节代替上面的内容。只有真 dylib 才谈得上 file-map-executable。
+    @Parameter(title: "拷贝源文件（可选）", default: "")
     var source: String
 
-    @Parameter(title: "扫描候选目录", description: "忽略目录与文件名，逐个候选目录各建一份", default: false)
+    /// 忽略目录与文件名，逐个候选目录各建一份。
+    @Parameter(title: "扫描候选目录", default: false)
     var matrix: Bool
 
-    @Parameter(title: "保留文件", description: "关掉则建完立刻删除，只留读数", default: true)
+    /// 关掉则建完立刻删除，只留读数。
+    @Parameter(title: "保留文件", default: true)
     var keep: Bool
 
     init() {}

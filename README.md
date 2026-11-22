@@ -69,7 +69,7 @@ base64 -i profile.mobileprovision -o profile.b64
 
 ---
 
-## 探针列表（14 个 intent，画廊里只放 10 个）
+## 探针列表（16 个 intent，画廊里只放 10 个）
 
 `AppShortcutsProvider` 每个 App 上限 10 个，所以画廊里只有前 10 个；
 其余的不注册也能被快捷指令索引到（搜 App 名字即可）。
@@ -90,6 +90,8 @@ base64 -i profile.mobileprovision -o profile.b64
 | **文件深挖** | IntentFile | security-scope、父目录、兄弟文件、能否当 dylib 加载 |
 | **代码执行** | 无 | 匿名 RWX 到底能不能取指（**会让 App 退出**） |
 | **创建文件** | 目录/文件名/内容 | 写下来的字节落在一个什么策略的目录里 |
+| **交给系统 App** | 模式 | 19 个 scheme 的 canOpen / open 差值，交接后进程去向 |
+| **交给系统打开** | URL | 由系统执行 open，不是我的进程（`opensIntent`） |
 
 判读方法见 [`PROBES.md`](PROBES.md)。
 
@@ -158,6 +160,7 @@ xcodebuild -project IntentProbe.xcodeproj -scheme IntentProbe \
 │   ├── ProbeIntents.swift        6 个输入边界 intent（文本/数组/文件/URL/实体/输出文件）
 │   ├── ProbeIntentsFS.swift      5 个沙箱 intent（扫描/路径/加载/文件深挖/代码执行）
 │   ├── ProbeFileCreate.swift     创建文件 + 可写目录矩阵（v7）
+│   ├── ProbeSystemApp.swift      URL scheme 交接矩阵 + 系统执行（v8）
 │   ├── ProbeEntity.swift         AppEntity + 三个查询入口
 │   ├── ProbeSnippet.swift        伪装弹窗 + 对话框两条 UI 通道
 │   ├── ProbeShortcuts.swift      AppShortcutsProvider（画廊磁贴，上限 10 个）

@@ -368,6 +368,19 @@ enum SysAppRunner {
     /// 轮询期间见过的最深状态。
     private static var observed: String = "active"
 
+    /// completion handler 的返回值。
+    ///
+    /// 不能再用一个裸的 `var cb`：它同时被 open 的回调（任意线程）写、
+    /// 被轮询循环（主线程）读，而工程是 `-enforce-exclusivity=checked` 编译的，
+    /// 这种并发访问在运行时是可能直接 trap 的。用一个带锁的盒子把它关起来，
+    /// 顺便也不用再对着"这个 var 到底谁在写"发呆。
+    private final class CBBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var v = "no-callback"
+        func set(_ s: String) { lock.lock(); v = s; lock.unlock() }
+        var value: String { lock.lock(); defer { lock.unlock() }; return v }
+    }
+
     private static func flushPending(left: Left, bgAt: Date?) {
         guard !flushed, let p = pending else { return }
         flushed = true
@@ -375,58 +388,111 @@ enum SysAppRunner {
 
         let after: String
         let leftStr: String
-        let verdict: String
         switch left {
-        case .background:
-            after = "background"; leftStr = "yes";     verdict = "switched"
-        case .inactive:
-            after = "inactive";   leftStr = "partial"; verdict = "possibly-prompted"
-        case .none:
-            after = "active";     leftStr = "no";      verdict = "inert"
+        case .background: after = "background"; leftStr = "yes"
+        case .inactive:   after = "inactive";   leftStr = "partial"
+        case .none:       after = "active";     leftStr = "no"
+        }
+
+        // 判据必须两维交叉，不能只看 `left`。
+        //
+        // v11 只用 `left` 一维，把两件完全不同的事压成了同一个 `inert`：
+        //   refused  + 没抢前台 = 真的什么都没发生
+        //   accepted + 没抢前台 = URL 投递了，只是目标没抢前台（Safari 后台加载）
+        // 后者被截图抓过一次（`https://localhost/...plist` 那条），
+        // 当时我标成"解释不了"——其实不是现象怪，是标签少了一档。
+        let open = p.cb()
+        let verdict: String
+        switch (open, left) {
+        case ("accepted", .background), ("no-callback", .background):
+            verdict = "switched"
+        case ("accepted", .inactive), ("no-callback", .inactive):
+            verdict = "possibly-prompted"
+        case ("accepted", .none):
+            verdict = "silent-delivered"
+        case ("refused", .none):
+            verdict = "inert"
+        case ("refused", .background):
+            // completion handler 假阴性：URL 明明投递成功、进程被切走了，
+            // handler 却回来报 refused。任何拿 handler 当判据的代码都会漏报这一种。
+            verdict = "anomaly-false-negative"
+        case ("refused", .inactive):
+            verdict = "prompted-then-refused"
+        case ("no-callback", .none):
+            // 回调压根没来，进程也没被切走。比 `refused` 弱一档：
+            // 不能断言"系统拒绝了"，只能说"三秒内什么都没发生"。
+            // v10 里 photos/music/sms 那几条都是这个形状（当时被前后台污染了，
+            // 现在这个标签至少不会再把它和"确认拒绝"混成一类）。
+            verdict = "no-callback-inert"
+        default:
+            verdict = "unknown"
         }
 
         var latency = "-"
-        if case .background = left, let f = lastFire, let b = bgAt {
+        if case .background = left, let f = lastFire {
+            // `bgAt` 来自 `didEnterBackground`，是最准的那个时间戳。
+            // 通知晚到一拍时它还是 nil，就退化成"轮询发现切走的时刻"——
+            // 那是上界，误差不超过一个轮询间隔（150ms），比记成 `-` 有用。
+            let b = bgAt ?? Date()
             latency = String(format: "%.2fs", b.timeIntervalSince(f))
         }
 
         ProbeLog.record(p.kind,
                         "run=\(runId) \(p.tag) \(p.label) :: "
-                        + "before=active after=\(after) open=\(p.cb()) "
+                        + "before=active after=\(after) open=\(open) "
                         + "left=\(leftStr) verdict=\(verdict) latency=\(latency)")
 
         // 自定义那一路要当场把结论回显到界面上：日志在最底下，
         // 而这一组是"点一下就想知道发生了什么"。
         if p.kind == "sysapp.custom" {
-            lastCustom = "\(verdict) · left=\(leftStr) · open=\(p.cb()) · \(p.tag)"
+            lastCustom = "\(verdict) · left=\(leftStr) · open=\(open) · \(p.tag)"
+            lastVerdict = verdict
         }
     }
 
     /// 真正的"交出去 + 判读"。串行队列和自定义 URL 共用这一份，
     /// 否则两边的判据会慢慢漂开，读数就没法横向比。
     private static func deliver(url: URL, label: String, kind: String, tag: String) async {
-        var cb = "no-callback"
+        let box = CBBox()
         flushed = false
         observed = "active"
         lastFire = Date()
-        pending = Pending(kind: kind, tag: tag, label: label, cb: { cb })
+        pending = Pending(kind: kind, tag: tag, label: label, cb: { box.value })
 
         UIApplication.shared.open(url, options: [:]) { ok in
-            cb = ok ? "accepted" : "refused"
+            box.set(ok ? "accepted" : "refused")
         }
 
-        // 8 × 150ms = 1.2 秒。切走的第一步是 inactive，几十毫秒内就到；
-        // 停在 inactive 不动，就是被系统 alert 盖住了。
-        for _ in 0..<8 {
+        // 3.0 秒窗口。上一版是 1.2 秒，而实测 `switched` 的 latency 分布在
+        // 0.84–1.19s——最慢那条离上限只差 10ms。窗口卡在数据分布边上，
+        // 尾巴上必然漏，漏掉的那部分会被误记成 `silent-delivered`。
+        //
+        // 但 `refused` 一旦确定，多等就没意义（它已经表示"没投递"）。
+        // 只多等 0.6 秒去抓 `anomaly-false-negative`，然后收工。
+        let fireAt = Date()
+        let deadline = fireAt.addingTimeInterval(3.0)
+        while Date() < deadline {
             if flushed { break }
             let s = ProbeLog.appState
             if s == "background" { observed = "background"; break }
             if s == "inactive" { observed = "inactive" }
+            if box.value == "refused", Date().timeIntervalSince(fireAt) > 0.6 { break }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
 
         if !flushed {
-            flushPending(left: observed == "inactive" ? .inactive : .none, bgAt: nil)
+            // 三档都要映射对。上一版写的是 `observed == "inactive" ? .inactive : .none`，
+            // `observed == "background"` 会掉进 `.none` 分支——如果
+            // `didEnterBackground` 的通知晚于这里的 break 一拍，一条明明切走的
+            // 读数就会被记成 `inert`。这正是"没抢前台 ≠ 没送到"那个混淆的源头，
+            // 不能留着。
+            let l: Left
+            switch observed {
+            case "background": l = .background
+            case "inactive":   l = .inactive
+            default:           l = .none
+            }
+            flushPending(left: l, bgAt: nil)
         }
     }
 
@@ -456,12 +522,20 @@ enum SysAppRunner {
     }
 
     private static let kLastCustom = "sysapp.custom.last"
+    private static let kLastVerdict = "sysapp.custom.verdict"
 
     /// 上一次自定义的结果，给 UI 回显用。**这是唯一能当场看到结论的地方**——
     /// 日志要滚到最底下才看得见，而这一组恰恰是"我点一下就想知道发生了什么"。
     static var lastCustom: String {
         get { UserDefaults.standard.string(forKey: kLastCustom) ?? "-" }
         set { UserDefaults.standard.set(newValue, forKey: kLastCustom) }
+    }
+
+    /// 上一次的 `verdict` 单词，单独存一份，只为让界面能按结论上色。
+    /// 从 `lastCustom` 里切字符串也能拿到，但那是拿显示文本当数据用，一改格式就崩。
+    static var lastVerdict: String {
+        get { UserDefaults.standard.string(forKey: kLastVerdict) ?? "-" }
+        set { UserDefaults.standard.set(newValue, forKey: kLastVerdict) }
     }
 
     /// 自定义 URL：不消费 cursor、不 arm，随时可以打一发。

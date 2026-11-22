@@ -1,0 +1,27 @@
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+build-mac/
+*.xcuserstate
+xcuserdata/
+
+# 产物
+dist/
+*.ipa
+*.zip
+variants/
+
+# 日志
+*.log
+
+# macOS
+.DS_Store
+
+# 签名材料 —— 绝对不要提交
+*.p12
+*.mobileprovision
+*.cer
+*.pem
+*.b64

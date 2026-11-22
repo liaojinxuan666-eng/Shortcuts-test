@@ -61,8 +61,8 @@ jobs:
           git ls-files | sed 's/^/  /' || true
           echo
 
-          EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift"
-          echo "=== 源文件逐项检查（应有 6 个） ==="
+          EXPECTED="IntentProbeApp.swift ProbeLog.swift ProbeIntents.swift ProbeEntity.swift ProbeSnippet.swift ProbeShortcuts.swift ProbeFS.swift ProbeDylib.swift ProbeIntentsFS.swift ProbeCodeExec.swift ProbeFileCreate.swift ProbeSystemApp.swift ProbeEnv.swift"
+          echo "=== 源文件逐项检查（应有 13 个） ==="
           fail=0
           for f in $EXPECTED; do
             if [ -f "IntentProbe/$f" ]; then
@@ -81,10 +81,10 @@ jobs:
             echo "::error title=源文件不全::IntentProbe/ 下缺少上表标记为 MISS 的文件。"
             echo "::error::常见原因：用网页逐个上传时漏了文件，或只拖了部分 .swift 进仓库。"
             echo "::error::修复：从仓库根执行 —— git ls-files | grep IntentProbe"
-            echo "::error::确认 6 个 .swift 都在，缺的补上后 commit + push。"
+            echo "::error::确认 13 个 .swift 都在，缺的补上后 commit + push。"
             exit 1
           fi
-          echo "预检通过：6 个源文件齐全"
+          echo "预检通过：13 个源文件齐全"
 
       - name: 安装 XcodeGen
         run: |

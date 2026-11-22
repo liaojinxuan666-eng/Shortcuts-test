@@ -146,13 +146,67 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
 
-            Text("上次：\(lastCustom)")
-                .font(.system(size: 10, design: .monospaced))
+            HStack(spacing: 6) {
+                // 结论单独做成色块。上一版只把它塞在一行灰色小字里，
+                // `inert` 和"没点上"在屏幕上长得一样——那轮你连点三次就是这个原因。
+                Text(SysAppRunner.lastVerdict)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(verdictColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(verdictColor.opacity(0.14), in: Capsule())
+
+                Text(lastCustom)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(verdictHint)
+                .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// 结论上色。四象限 + 两个异常档，跟 `flushPending` 里的 switch 一一对应，
+    /// 两边改一边就得改另一边——所以这里不再做字符串切分，直接读独立的 `lastVerdict`。
+    private var verdictColor: Color {
+        switch SysAppRunner.lastVerdict {
+        case "switched":                return .green
+        case "silent-delivered":        return .blue
+        case "possibly-prompted":       return .orange
+        case "prompted-then-refused":   return .orange
+        case "anomaly-false-negative":  return .purple
+        case "inert":                   return .red
+        case "no-callback-inert":       return .gray
+        default:                        return .gray
+        }
+    }
+
+    /// 一句话解释这一档到底意味着什么。判据越细，越需要在屏幕上直接说人话，
+    /// 否则读日志的人还得回来翻文档。
+    private var verdictHint: String {
+        switch SysAppRunner.lastVerdict {
+        case "switched":
+            return "投递 + 抢前台：目标真的起来了，全程没有确认框"
+        case "silent-delivered":
+            return "投递了但没抢前台：URL 送到了，目标在后台处理（不是失败）"
+        case "possibly-prompted":
+            return "停在 inactive：多半压着一个系统确认框在等你点"
+        case "inert":
+            return "真没投递：scheme 不被接受，什么都没发生"
+        case "anomaly-false-negative":
+            return "handler 说谎：进程被切走了，回调却报 refused"
+        case "prompted-then-refused":
+            return "被盖住又报 refused：可能弹了框，但没送成"
+        case "no-callback-inert":
+            return "三秒内没回调也没切走：不能断言被拒，只能说没反应"
+        default:
+            return "还没打过，或者读数不完整"
+        }
     }
 
     private func fireCustom() {

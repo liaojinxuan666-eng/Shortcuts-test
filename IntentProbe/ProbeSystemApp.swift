@@ -178,10 +178,14 @@ enum ProbeSystemApp {
     static let corpusB: [Target] = ProbeCorpus.tierB.map {
         Target($0.label, $0.url, $0.note, tier: "B")
     }
+    /// v16：A 层那批页面，换成老语法 `App-prefs:` 重打一遍。
+    static let corpusAP: [Target] = ProbeCorpus.tierAP.map {
+        Target($0.label, $0.url, $0.note, tier: "AP")
+    }
 
     /// 全量 = 手写表 + 语料库。只用于导出清单，**别拿它当默认跑法**：
     /// 80 多条里每条被接受的都要人手点一次返回。
-    static let all: [Target] = legacy + corpusA + corpusB
+    static let all: [Target] = legacy + corpusA + corpusB + corpusAP
 
     static func targets() -> [Target] { all }
     static var priorityTargets: [Target] { legacy.filter(\.priority) }
@@ -320,6 +324,7 @@ enum SysAppRunner {
         case "control": return ProbeSystemApp.controls
         case "A":       return ProbeSystemApp.controls + ProbeSystemApp.corpusA
         case "B":       return ProbeSystemApp.controls + ProbeSystemApp.corpusB
+        case "AP":      return ProbeSystemApp.controls + ProbeSystemApp.corpusAP
         case "legacy":  return ProbeSystemApp.legacy
         default:        return ProbeSystemApp.all
         }

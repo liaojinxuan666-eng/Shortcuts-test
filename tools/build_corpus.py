@@ -114,6 +114,60 @@ RULES = [
 ]
 
 
+# ---------------------------------------------------------------- App-prefs 矩阵（v16）
+# v15 的结论把战场挪了位置：`settings-navigation://` 28 条全 refused，
+# 而 `App-prefs:root=Privacy` accepted 并真的切走了。
+# 所以 v16 把**同一批页面**用老语法重写一遍——同一批目标、换一个 scheme 名，
+# 如果结果反过来，那"门"就在 scheme 名上，不在页面上。
+#
+# 键名来自两处：语料库里 52 条 `prefs:` 的老键名，加上 settings-navigation 的路径段。
+# 打 `?` 的是我按命名规律猜的，跑出来 refused 不能当"页面不存在"，
+# 只能当"这个键名不对"——这两件事必须分开记。
+APPREFS = [
+    # (label, url, note, certain)
+    ("ap.privacy-root",   "App-prefs:root=Privacy",
+     "正对照：v15 唯一 accepted 的那条，原样重跑，确认可复现", True),
+    ("ap.profiles",       "App-prefs:root=General&path=ManagedConfigurationList",
+     "描述文件安装页。v15 用 settings-navigation 打是 refused", True),
+    ("ap.reset",          "App-prefs:root=General&path=Reset",
+     "还原页。再两步是抹掉所有内容和设置", True),
+    ("ap.passcode",       "App-prefs:root=TOUCHID_PASSCODE",
+     "触控 ID 与密码页。锚点（改密码/关密码）老语法不支持，只能到页", True),
+    ("ap.autofill",       "App-prefs:root=General&path=AUTOFILL",
+     "自动填充与密码", False),
+    ("ap.passwords",      "App-prefs:PASSWORDS",
+     "密码页。这条是 App-prefs 的另一种写法（不带 root=）", False),
+    ("ap.appleaccount",   "App-prefs:root=APPLE_ACCOUNT",
+     "Apple 账户页", False),
+    ("ap.cert-trust",     "App-prefs:root=General&path=About/CERT_TRUST_SETTINGS",
+     "根证书信任开关。老语法能不能带二级路径，这条就是答案", False),
+    ("ap.location",       "App-prefs:root=Privacy&path=LOCATION",
+     "定位服务总表", True),
+    ("ap.contacts",       "App-prefs:root=Privacy&path=CONTACTS", "通讯录授权总表", True),
+    ("ap.photos",         "App-prefs:root=Privacy&path=PHOTOS", "照片授权总表", True),
+    ("ap.microphone",     "App-prefs:root=Privacy&path=MICROPHONE", "麦克风授权总表", True),
+    ("ap.camera",         "App-prefs:root=Privacy&path=CAMERA", "相机授权总表", True),
+    ("ap.localnetwork",   "App-prefs:root=Privacy&path=LOCAL_NETWORK", "本地网络授权", True),
+    ("ap.tracking",       "App-prefs:root=Privacy&path=TRACKING", "跟踪授权总表", False),
+    ("ap.analytics",      "App-prefs:root=Privacy&path=PROBLEM_REPORTING", "分析与改进", False),
+    ("ap.wifi",           "App-prefs:root=WIFI", "无线局域网。配对/抓包准备面", True),
+    ("ap.bluetooth",      "App-prefs:root=Bluetooth", "蓝牙", True),
+    ("ap.about",          "App-prefs:root=General&path=About", "关于本机，指纹向", True),
+    ("ap.swupdate",       "App-prefs:root=General&path=SOFTWARE_UPDATE_LINK", "软件更新", True),
+    ("ap.storage",        "App-prefs:root=General&path=STORAGE_MGMT", "iPhone 存储空间", False),
+    ("ap.keyboard",       "App-prefs:root=General&path=Keyboard", "键盘", True),
+    ("ap.airdrop",        "App-prefs:root=General&path=AIRDROP_LINK", "隔空投送", False),
+    ("ap.siri",           "App-prefs:root=SIRI", "Siri", True),
+    ("ap.screentime",     "App-prefs:root=SCREEN_TIME", "屏幕使用时间", False),
+    ("ap.accessibility",  "App-prefs:root=General&path=ACCESSIBILITY", "辅助功能", True),
+    ("ap.notifications",  "App-prefs:root=NOTIFICATIONS_ID", "通知", True),
+    # 老语法的第二个样本：v15 里 Prefs:root=Privacy&path=LOCATION 是 refused，
+    # 这里补两条，确认整个 prefs: 家族都死了，而不是某一条拼错。
+    ("pf.wifi",           "prefs:root=WIFI", "老 prefs: 家族复核样本", True),
+    ("pf.about",          "prefs:root=General&path=About", "老 prefs: 家族复核样本二", True),
+]
+
+
 def norm_route(url: str) -> str:
     """把一条 URL 归一化成可比较的「路由」。"""
     u = url.strip()
@@ -248,6 +302,12 @@ def main() -> int:
             )
         return "\n".join(out)
 
+    ap_rows = "\n".join(
+        '        ("%s",\n         "%s",\n         "%s%s"),'
+        % (lbl, url, note, "" if certain else " ?")
+        for lbl, url, note, certain in APPREFS
+    )
+
     swift = f'''// 本文件由 tools/build_corpus.py 生成，**不要手改**。
 //
 // 数据来源：corpus/source/awesome-ios-url-schemes.json
@@ -274,7 +334,19 @@ enum ProbeCorpus {{
 {swift_rows(b[:28], "B")}
     ]
 
-    static var all: [(label: String, url: String, note: String)] {{ tierA + tierB }}
+    /// v16：把 A 层那批页面用老语法 `App-prefs:` 重写一遍。
+    ///
+    /// v15 的结果是 `settings-navigation://` 28/28 refused，而
+    /// `App-prefs:root=Privacy` accepted 并切走了。同一批目标、只换 scheme 名，
+    /// 所以这一层问的是：**门在 scheme 名上，还是在页面上。**
+    ///
+    /// 每条末尾的 `?` 表示键名是猜的：refused 只能读成"键名不对"，
+    /// 不能读成"页面不存在"。
+    static let tierAP: [(label: String, url: String, note: String)] = [
+{ap_rows}
+    ]
+
+    static var all: [(label: String, url: String, note: String)] {{ tierA + tierB + tierAP }}
 }}
 '''
     OUT_SWIFT.write_text(swift, encoding="utf-8")

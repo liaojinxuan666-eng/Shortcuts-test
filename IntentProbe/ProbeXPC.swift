@@ -136,21 +136,38 @@ final class XPCProbe: ObservableObject {
         var value: String? { lock.lock(); defer { lock.unlock() }; return v }
     }
 
+    /// 两个坑，v15 一次踩全：
+    ///
+    /// 1. **不能截断。** v15 截在 140 字符，正好把 `<string: ...> { length = 21,
+    ///    contents = "Connection invalid" }` 里的 `contents` 切掉，于是
+    ///    `classify` 找不到 "connection invalid"，退到 `hasPrefix("<dictionary")`
+    ///    判成 `replied`。16 个"能看见"里 14 个是这么来的。
+    /// 2. **不能留换行。** `xpc_copy_description` 是多行的，一条日志被拆成两行，
+    ///    下一次读的时候根本看不出它们是一行。
     private static func describe(_ api: API, _ obj: UnsafeMutableRawPointer) -> String {
         guard let p = api.desc(obj) else { return "no-description" }
         defer { free(p) }
-        let s = String(cString: p)
-        return s.count > 140 ? String(s.prefix(140)) : s
+        return String(cString: p)
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
     }
 
     /// 三档判词。`silent` 和 `denied` 必须分开：
     /// `no-event` 表示"没收到 CONNECTION_INVALID"，即 lookup 大概率成功了，
     /// 只是服务不理会这个空消息。把它算成失败会低估可达面，算成成功会高估。
+    /// **先判错误字典，再判"是个字典"。**
+    ///
+    /// `XPCErrorDescription` 这个键只出现在 libxpc 自己生成的错误字典里
+    /// （connection invalid / interrupted / terminated）。它长得也像回复
+    /// ——`<dictionary: 0x...> { count = 1, ... }`——所以顺序反了就会把
+    /// "被拒"读成"收到回复"。v15 就是这么把 denied=0 报出来的。
     private static func classify(_ d: String) -> String {
         let low = d.lowercased()
-        if low.contains("connection invalid")      { return "denied" }
-        if low.contains("connection interrupted")  { return "interrupted" }
-        if low.contains("connection")              { return "conn-error" }
+        if low.contains("xpcerrordescription") {
+            if low.contains("connection invalid")     { return "denied" }
+            if low.contains("connection interrupted") { return "interrupted" }
+            return "conn-error"
+        }
         if low.hasPrefix("<dictionary") || low.hasPrefix("<string")
             || low.hasPrefix("<data") || low.hasPrefix("<array") { return "replied" }
         return "other"

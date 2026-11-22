@@ -271,7 +271,7 @@ struct ContentView: View {
                 Button(done ? "再来一轮" : (armed ? "继续" : "开始")) {
                     Task { @MainActor in
                         if !armed || done {
-                            SysAppRunner.reset(to: "A")
+                            SysAppRunner.reset(to: "AP")
                             await SysAppRunner.fireNext(trigger: "bar-start")
                         } else {
                             await SysAppRunner.fireNext(trigger: "bar-tap")
@@ -288,7 +288,7 @@ struct ContentView: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             } else if !armed {
-                Text("A 层 28 条：一步之内能改设备安全状态的系统面板。一次发一个，发完会切走，点回来继续。")
+                Text("App-prefs 29 条：v15 里 settings-navigation 28/28 被拒，这批是同样的页面换老语法重打。")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -304,10 +304,10 @@ struct ContentView: View {
                 .font(.system(size: 10))
                 .buttonStyle(.bordered)
 
-                Button("B 层 28") {
+                Button("App-prefs 29") {
                     Task { @MainActor in
-                        SysAppRunner.reset(to: "B")
-                        await SysAppRunner.fireNext(trigger: "bar-B")
+                        SysAppRunner.reset(to: "AP")
+                        await SysAppRunner.fireNext(trigger: "bar-AP")
                         reload()
                     }
                 }
